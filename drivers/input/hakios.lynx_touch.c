@@ -511,8 +511,10 @@ static void
 buttons_init(void)
 {
 	alive_d = ml_io_map(0x180D0000ull, MAP_SIZE);
-	/* volume up (gpa8-5) has no pull in the FDT and read 0 all the time here (v15b): its outside pull-up is not powered.
-	 * The pad's own pull-up (PUD +0x08, 4 bits a pin, 3 = up), as power and volume down have. */
+	/* Volume up (gpa8-5) has no pull in the FDT, unlike power and volume down. On the phone this was written with, that
+	 * button is physically broken and its line reads 0 all the time, so volume up is UNTESTED here. The pad's own pull-up
+	 * (PUD +0x08, 4 bits a pin, 3 = up) and the FDT's pin function below were tried against that fault and changed
+	 * nothing; they are left in as harmless. */
 	tlog("lynx_touch: gpa8 before: con %#x dat %#x pud %#x\n", rd(alive + 0x40), rd(alive + 0x44), rd(alive + 0x48));
 	wr(alive + 0x40 + 0x08, (rd(alive + 0x40 + 0x08) & ~(0xfu << 20)) | (0x3u << 20));
 	sleep_ms(2);

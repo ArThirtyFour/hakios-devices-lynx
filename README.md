@@ -20,7 +20,7 @@ it from the computer over USB at every boot.
 | boot | works | `lynxld/`: entered by the bootloader as a Linux Image (EL2, MMU off), USB gadget for the system image, Apple device tree and boot arguments, kernel started on a Cortex-X1 |
 | display | works | 1080×2400, the bootloader's own scanout buffer kept running (DECON0); everything is drawn in software |
 | touch | works | Goodix GT9895 on SPI (PERIC1 USI0): power through ACPM, pins and clocks in `lynxld/touch_up.c`, the protocol in `drivers/input/hakios.lynx_touch.c` (`lynx_touch=1`) |
-| buttons | partial | power and volume down work; volume up is not seen (its line reads low all the time) |
+| buttons | works | power and volume down, plain GPIOs polled with the touch screen. Volume up is in the driver the same way but **untested**: that button is physically broken on the phone this was done with |
 | CPU | partial | 7 of 8 cores: 2 X1 at 2048 MHz, 2 A78 at 1663 MHz, 3 A55 at 1197 MHz, set once through ACPM DVFS. The eighth core is the loader's. **No thermal control** |
 | battery | works | MAX77759 fuel gauge and charger read over I2C, bit-banged on the bus's pads (`drivers/power/hakios.lynx_battery.c`, `lynx_battery=1`): charge, voltage, current, temperature, charger state |
 | GPU / Metal | missing | no Mali-G710 driver. Wallpapers and blurred parts of the interface are not drawn as they should be |
