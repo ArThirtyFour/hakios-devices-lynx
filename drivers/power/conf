@@ -1,0 +1,5 @@
+# devices/lynx/drivers/power/conf: the Pixel 7a's own power drivers (docs/porting/drivers.md).
+
+driver LYNX_BATTERY
+	file    bsd/dev/hakios.lynx_battery.c
+	help    the Pixel 7a battery: MAX77759 fuel gauge and charger read on the pads of the PERIC1 USI13 bus (lynx_battery=1)

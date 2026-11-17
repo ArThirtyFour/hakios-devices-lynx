@@ -1,0 +1,25 @@
+# Generated at build time
+out/
+*.o
+*.elf
+*.bin
+*.gspe
+lynxrun
+
+# Not ours to publish: the phone's firmware, Android's boot image and kernel, images made from them, iOS
+fw-*/
+*.img
+*.lz4
+*.raw
+*.apfs
+*.ipsw
+*.dtb
+Image
+identity.h
+
+# Runs
+*.log
+logs/
+run*/
+.DS_Store
+__pycache__/

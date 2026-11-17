@@ -1,0 +1,5 @@
+# devices/lynx/drivers/input/conf: the Pixel 7a's own input drivers (docs/porting/drivers.md).
+
+driver LYNX_TOUCH
+	file    bsd/dev/hakios.lynx_touch.c
+	help    the Pixel 7a touch screen: Goodix GT9895 on PERIC1 USI0 SPI, powered and set up by lynxld (lynx_touch=1)

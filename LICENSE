@@ -1,0 +1,44 @@
+hakios-devices-lynx
+
+Several licenses apply, by directory:
+
+1. drivers/ and xnu/ are a derivative work of Apple's XNU and of the HakiOS kernel drivers and are licensed
+   under the Apple Public Source License, Version 2.0 (the full text is LICENSE.APSL of the HakiOS repository,
+   https://github.com/oosexgang/hakios-xnu-kernel).
+
+2. lynxld/acpm/ and lynxld/usb/ come from PixOS (https://github.com/PixOS-Project/pixelios-kernel): MIT,
+   Copyright (c) 2026 PixOS-Project contributors; the text is LICENSE.PixOS-MIT in each of the two directories.
+
+3. probes/gs201_cal.h reproduces the PCIe PHY calibration of Google's kernel/gs
+   (drivers/pci/controller/dwc/pcie-exynos-gs201-rc-cal.c, Copyright Samsung Electronics Co., Ltd.):
+   GPL-2.0-only. probes/pcieprobe.c includes it and is GPL-2.0-only as well.
+
+4. Everything else (the loader in lynxld/, the other probes, the tools, the device layer, the documentation)
+   is licensed under the MIT License below.
+
+The phone's firmware, Android's boot image and kernel, and Apple's operating system are not part of this
+repository and are not licensed by it (LEGAL.md).
+
+----------------------------------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2026 ArThirtyFour
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

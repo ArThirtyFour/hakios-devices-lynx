@@ -1,0 +1,50 @@
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -135,6 +135,47 @@
+ 	 * that is not for this core to do.
+ 	 */
+ 	msr		DAIFSet, #(DAIFSC_ALL)				// Disable all interrupts
++	/*
++	 * Firmware that starts a core in EL2 (Exynos / Tensor: PSCI CPU_ON from a kernel the
++	 * boot loader put in EL1 still comes up in EL2): the same hand-off to EL1 the boot
++	 * loader did for the boot processor, then on from the next instruction.
++	 */
++	mrs		x0, CurrentEL
++	cmp		x0, #0x8
++	b.ne	Lreset_in_el1
++	mov		x0, #0x80000000						// HCR_EL2.RW: AArch64 EL1, no stage 2, no traps
++	msr		HCR_EL2, x0
++	mov		x0, #3								// CNTHCTL_EL2: EL1PCTEN | EL1PCEN
++	msr		CNTHCTL_EL2, x0
++	msr		CNTVOFF_EL2, xzr
++	mov		x0, #0x33ff							// CPTR_EL2: no FP/SIMD trap
++	msr		CPTR_EL2, x0
++	msr		HSTR_EL2, xzr
++	msr		VTTBR_EL2, xzr
++	mrs		x0, MIDR_EL1
++	msr		VPIDR_EL2, x0
++	mrs		x0, MPIDR_EL1
++	msr		VMPIDR_EL2, x0
++	mrs		x0, S3_4_C12_C9_5					// ICC_SRE_EL2
++	orr		x0, x0, #0x1						// SRE
++	orr		x0, x0, #0x8						// Enable: EL1 may use the GIC's system registers
++	msr		S3_4_C12_C9_5, x0
++	isb
++	MOV64	x0, 0x30D00800
++	msr		SCTLR_EL1, x0
++	mov		x0, #0x300000						// CPACR_EL1.FPEN
++	msr		CPACR_EL1, x0
++	isb
++	ic		iallu
++	tlbi	alle1
++	dsb		sy
++	isb
++	mov		x0, #0x3c5							// EL1h, DAIF masked
++	msr		SPSR_EL2, x0
++	adr		x0, Lreset_in_el1
++	msr		ELR_EL2, x0
++	eret
++Lreset_in_el1:
+ 	adrp	x0, EXT(LowSecondaryExceptionVectorBase)@page
+ 	add		x0, x0, EXT(LowSecondaryExceptionVectorBase)@pageoff
+ 	msr		VBAR_EL1, x0
