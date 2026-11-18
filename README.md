@@ -13,24 +13,7 @@ probes the drivers were worked out with.
 changed, and the next reboot is Android again. The system image is not on the phone either: the loader takes
 it from the computer over USB at every boot.
 
-## What works
 
-| | | |
-| --- | --- | --- |
-| boot | works | `lynxld/`: entered by the bootloader as a Linux Image (EL2, MMU off), USB gadget for the system image, Apple device tree and boot arguments, kernel started on a Cortex-X1 |
-| display | works | 1080×2400, the bootloader's own scanout buffer kept running (DECON0); everything is drawn in software |
-| touch | works | Goodix GT9895 on SPI (PERIC1 USI0): power through ACPM, pins and clocks in `lynxld/touch_up.c`, the protocol in `drivers/input/hakios.lynx_touch.c` (`lynx_touch=1`) |
-| buttons | works | power and volume down, plain GPIOs polled with the touch screen. Volume up is in the driver the same way but **untested**: that button is physically broken on the phone this was done with |
-| CPU | partial | 7 of 8 cores: 2 X1 at 2048 MHz, 2 A78 at 1663 MHz, 3 A55 at 1197 MHz, set once through ACPM DVFS. The eighth core is the loader's. **No thermal control** |
-| battery | works | MAX77759 fuel gauge and charger read over I2C, bit-banged on the bus's pads (`drivers/power/hakios.lynx_battery.c`, `lynx_battery=1`): charge, voltage, current, temperature, charger state |
-| GPU / Metal | partial | the Mali-G710 driver and its IOKit service are in `drivers/gpu/` (kept out of this repository, see there): the GPU comes up step by step (`mali=N`), its MCU runs Arm's CSF firmware (the phone's own `mali_csffw-r54p3.bin`) and answers a ping; the command stream, the shaders and `hakios-metal`'s back end were moved from the Pixel 8a's GPU architecture (G715, arch 11) to this one (G710, arch 10): scordboard, wait masks, GPU_ID. Not yet a working Metal device in iOS: the precompiled blit shaders and a few drawing registers still have to be brought over. |
-| Bluetooth | partial | the loader loads the chip's firmware (WCN6740, UART), the kernel proves it (HCI 12.0000, its own address, LE scan finds devices) and gives it to iOS: the kernel control, the Skywalk pipe and the nodes `/dev/btwake|btreset|btpoweroff` (`drivers/bluetooth/hakios.lynx_bt.c`, the chip-independent half in the main tree). iOS's `bluetoothd` attaches and its logs are answered by an inserted library; it still will not power the controller (the toggle springs back), which is what is being chased. |
-| Wi-Fi | partial | a driver now, `drivers/wifi/hakios.lynx_wifi.c` (`wifi=N`): the WCN6740 on PCIe RC channel 1, brought up step by step as the probe did, with the missing step added -- 1 the rails/clocks/PHY and the link to L0, 2 the MHI registers, 3 the SBL (`fw/amss20.bin`, its first 512 KiB) handed to the chip over BHI after the S2MPU and the PCIe SysMMU are opened 1:1 under its buffer and the WLAN domain released (`WLAON_QFPROM_PWR_CTRL`, which the v7 probe showed the PBL was waiting on: it took the doorbell but made no DMA read), 4 the MHI RESET->READY transition. Not yet run on the phone: whether the chip now reads the buffer (BHI_EXECENV 0->1) is exactly what it is for. |
-| storage | missing | none of the phone's: the system image is in RAM |
-| audio, cellular, camera, sensors | missing | audio started: `drivers/aoc/` (gs201's AoC: `aoc_req` 0x181d0000, S2MPU 0x1a0b0000, SysMMU 0x1a090000, GSA 0x17c90000) and `drivers/audio/` (the two CS35L41 on PERIC0 USI7). The AoC needs its firmware (`/vendor/firmware/aoc.bin`, not pulled yet) and a Trusty client to cold-start it; the amplifiers need their SPI clock confirmed. Cellular, camera and sensors: not started. |
-
-What was seen on the phone and what was only built is said in each row; `device.conf` has the same in the
-form HakiOS reads.
 
 ### Things to know before running it
 
