@@ -1,0 +1,7 @@
+# devices/lynx/drivers/trusty/conf: a client of Trusty, the Pixel 7a's secure-world OS (docs/drivers-config.md,
+# docs/porting/drivers.md): the GSA's AoC service (which cold-starts the AoC: audio, sensors) is reached through it.
+
+driver LYNX_TRUSTY
+	file    bsd/dev/hakios.lynx_trusty.c
+	help    a client of Trusty, the Pixel 7a's secure-world OS (SMC calls, FF-A shared memory, Trusty IPC): the GSA's AoC
+	help    service is behind it; a look so far (trusty=1): Trusty's version and API, FF-A's version and our endpoint id

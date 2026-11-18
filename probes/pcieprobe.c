@@ -649,13 +649,36 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                         after = winrd(bar, 0x1F8031Cu);
                         log_hex("WLAON_QFPROM_PWR_CTRL after", after); log_flush();
                     }
-                    /* v13: BHIe, the way this chip is loaded. The phone's own Android does not use plain BHI
-                     * here: mhi_alloc_bhie_table() splits the firmware into 512 KB segments and puts a table of
-                     * them in memory (struct bhi_vec_entry { u64 dma_addr; u64 size; }), and mhi_fw_load_bhie()
-                     * gives the chip that table's address and size. The chip reads the table first, then each
-                     * segment itself (Android's log: "seg_size: 524288 total_seg: 12", entries at 0xfa880000).
-                     * Our single buffer was a plain-BHI image to a chip that is in BHIe mode, which is exactly
-                     * "the doorbell is taken and nothing is read". */
+                    {
+                        uint32_t v;
+
+                        log_str("v16: the reset before the download\n");
+                        log_hex(" PCIE_TXVECDB before", rd(bar + 0x360)); log_hex(" PCIE_TXVECSTATUS before", rd(bar + 0x368));
+                        log_hex(" PCIE_RXVECDB before", rd(bar + 0x394)); log_hex(" PCIE_RXVECSTATUS before", rd(bar + 0x39C));
+                        wr(bar + 0x360, 0); wr(bar + 0x368, 0); wr(bar + 0x394, 0); wr(bar + 0x39C, 0);
+                        log_hex(" PCIE_TXVECSTATUS after", rd(bar + 0x368)); log_flush();
+                        log_hex(" PCIE_INT_ALL_CLEAR before", winrd(bar, 0x1E08228));
+                        winwr(bar, 0x1E08228, 0xffffffffu);                 /* all interrupts cleared */
+                        log_hex(" WLAON_SOC_RESET_CAUSE (read clears)", winrd(bar, 0x1F8060C));
+                        log_hex(" WLAON_WARM_SW_ENTRY before", winrd(bar, 0x1F80504));
+                        winwr(bar, 0x1F80504, 0);                           /* no warm path for the Q6 */
+                        wait_us(10000);
+                        log_hex(" WLAON_WARM_SW_ENTRY after", winrd(bar, 0x1F80504));
+                        v = rd(bar + 0x3008);                               /* PCIE_SOC_GLOBAL_RESET */
+                        log_hex(" PCIE_SOC_GLOBAL_RESET before", v);
+                        wr(bar + 0x3008, v | 1u); (void)rd(bar + 0x3008);
+                        wait_us(10000);
+                        wr(bar + 0x3008, v & ~1u); (void)rd(bar + 0x3008);
+                        wait_us(10000);
+                        log_hex(" PCIE_SOC_GLOBAL_RESET after", rd(bar + 0x3008));
+                        log_hex(" MHISTATUS before", rd(bar + 0x48));
+                        wr(bar + 0x38, 2);              /* MHICTRL = MHICTRL_RESET_MASK: clears SYSERR */
+                        wait_us(10000);
+                        log_hex(" MHISTATUS after", rd(bar + 0x48)); log_hex(" MHICTRL after", rd(bar + 0x38));
+                        log_flush();
+                    }
+                    if (ee == 1 && bhie && bhie < 0x100000 && !(bhie & 3)) {
+                    
                     if (bhie && bhie < 0x100000 && !(bhie & 3)) {
                         struct { uint64_t addr, size; } *table = (void *)(uintptr_t)0xfb400000ull;   /* in wifi_region, after the image */
                         uint32_t seg = 0x80000u, at = 0, n = 0, vst = 0xffffffffu, lastv = 0xfffffffeu;
@@ -692,26 +715,18 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                         stage((vst >> 30) == 2 ? "BHIe: the chip read the table and the image" : "BHIe did not complete");
                         pci_errors("errors after BHIe: wifi", CFG);
                     }
+                    }
                     for (int attempt = 0; attempt < 2 && ee != 1; attempt++) {
                         if (attempt == 0) {
-                            volatile uint64_t *to = (volatile uint64_t *)0x8c0000000ull;
-                            const uint64_t *from = (const uint64_t *)(uintptr_t)fw;
-
-                            for (uint32_t i = 0; i < (size + 7) / 8; i++) to[i] = from[i];
-                            __asm__ volatile("dsb sy" ::: "memory");
-                            img = 0x8c0000000ull;
+                            img = (uint64_t)(uintptr_t)fw;   /* Android's first BHI buffer is in wifi_region */
+                            size = 0x80000;                 /* Android's sbl_size; BHIe loads the rest later */
                         } else {
                             img = (uint64_t)(uintptr_t)fw;
                         }
                         lastst = lastee = 0xffffffffu;
                         log_hex("BHI attempt", (uint64_t)attempt);
                         log_hex(" image at", img); log_hex(" size", size); log_hex(" its first word", rd(img)); log_flush();
-                        if (attempt == 1) {
-                            /* v14: the one BHI register we have never written. Nothing in the reference touches
-                             * it, but the chip may want the number of segments before it walks the image. */
-                            wr(bar + bhi + 0x48, 1);                 /* BHI_NUMSEG = 1 */
-                            log_hex("BHI_NUMSEG written", 1);
-                        }
+                        /* Android never writes BHI_NUMSEG; leave its bootloader value untouched. */
                         wr(bar + bhi + 0x20, 0);                    /* BHI_INTVEC: nobody listens */
                         wr(bar + bhi + 0x2c, 0);                    /* BHI_STATUS */
                         wr(bar + bhi + 0x0c, (uint32_t)(img >> 32));
@@ -754,7 +769,6 @@ void lynxld_main(uint64_t fdt, uint64_t self)
         stage("LINK DID NOT COME UP");
     }
 
-    /* ---- off again: exynos_pcie_rc_poweroff(), rc.c:3618-3636 ---- */
     stage("tidy");
     rmw(GPH2 + 4, 1u << 0, 0);                                  /* PERST low */
     wr(ELBI + PCIE_APP_LTSSM_ENABLE, 0);

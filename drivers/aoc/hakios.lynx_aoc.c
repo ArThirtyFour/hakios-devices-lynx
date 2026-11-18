@@ -91,6 +91,19 @@ extern void lynx_tlog(const char *fmt, ...) __printflike(1, 2);
  */
 int lynx_trusty_aoc_cmd(uint32_t cmd, uint32_t *state) __attribute__((weak));
 
+/*
+ * ... and a weak definition of it, so that a kernel built without the Trusty client still links (a weak undefined
+ * symbol is not enough for this kernel's link): it answers -2, "there is no client", which the start treats as
+ * "cannot go further" rather than as the GSA's error.
+ */
+__attribute__((weak)) int
+lynx_trusty_aoc_cmd(uint32_t cmd, uint32_t *state)
+{
+	(void)cmd;
+	(void)state;
+	return -2;
+}
+
 /* drivers/audio (amp=2): the CS35L41s */
 int lynx_amp_speaker(int on) __attribute__((weak));
 int lynx_amp_variant(int k) __attribute__((weak));
@@ -1095,9 +1108,17 @@ aoc_boot_image(const uint8_t *f, uint64_t size)
 		lynx_tlog("lynx aoc: no Trusty client (lynx_trusty_aoc_cmd is not built): the AoC cannot be started on gs201\n");
 		return;
 	}
-	if (lynx_trusty_aoc_cmd(GSA_AOC_GET_STATE, &state) != 0) {
-		lynx_tlog("lynx aoc: the GSA's AoC service not reached (Trusty): not loaded\n");
-		return;
+	{
+		int rc = lynx_trusty_aoc_cmd(GSA_AOC_GET_STATE, &state);
+
+		if (rc == -2) {
+			lynx_tlog("lynx aoc: no Trusty client built (lynx_trusty_aoc_cmd answers -2): the AoC cannot be started\n");
+			return;
+		}
+		if (rc != 0) {
+			lynx_tlog("lynx aoc: the GSA's AoC service not reached (Trusty, %d): not loaded\n", rc);
+			return;
+		}
 	}
 	lynx_tlog("lynx aoc: the AoC's state %u (0 inactive); copying the image ...\n", state);
 	if (state != 0) {

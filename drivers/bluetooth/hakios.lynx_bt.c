@@ -337,6 +337,21 @@ lynx_bt_function_off(void)
 static int
 lynx_bt_send(const uint8_t *h4, unsigned length)
 {
+	/* Apple's last HCI-init step is Write Default Erroneous Data Reporting (0x0c5b).
+	 * This chip does not claim that optional command; answer locally rather than
+	 * sending an unsupported command to the Qualcomm controller. */
+	if (length == 5 && memcmp(h4, "\x01\x5b\x0c\x01\x01", 5) == 0) {
+		uint8_t *answer;
+
+		if (ours_in - ours_out >= OURS) {
+			return ENOBUFS;
+		}
+		answer = ours[ours_in % OURS];
+		memcpy(answer, "\x04\x0e\x04\x01\x5b\x0c\x00", 7);
+		ours_in++;
+		lynx_tlog("lynx_bt: 0x0c5b answered locally (the chip does not support it)\n");
+		return 0;
+	}
 	/* t3: Apple's Write LE Host Support (01 01) gets status 0x11 on WCN6740.
 	 * Use LE enabled with simultaneous-host support clear, as Linux's
 	 * hci_write_le_host_supported_sync(hdev, 0x01, 0x00). Keep the real reply.
@@ -391,6 +406,17 @@ lynx_bt_receive(uint8_t *h4, unsigned room, unsigned wait_ms)
 		return 7;
 	}
 	n = h4_read(h4, room, wait_ms);
+	/* Apple's descriptor for the final init command 0x0c5b (id 0x7c)
+	 * checks Supported Commands octet 18, bit 3. The Qualcomm answer has
+	 * octet 18 = 0x83; without the bit bluetoothd refuses to issue it and
+	 * terminates HCI init with state 3 (error 108). The command is handled
+	 * locally in lynx_bt_send above, so advertise precisely that extra bit. */
+	if (n >= 71 && h4[0] == 0x04 && h4[1] == 0x0e && h4[4] == 0x02 && h4[5] == 0x10 && h4[6] == 0x00 &&
+	    (h4[7 + 18] & 0x08u) == 0) {
+		lynx_tlog("lynx_bt: Supported Commands octet 18: %#x -> %#x (0x0c5b handled locally)\n",
+		    h4[7 + 18], h4[7 + 18] | 0x08u);
+		h4[7 + 18] |= 0x08u;
+	}
 	/*
 	 * t15: the identity the daemon can place. Our BlueTool answers as Broadcom ("BCM4383A3"), and Apple's stack
 	 * has a platform/chipset table with no Qualcomm entry at all: a controller that answers manufacturer 0x001d
