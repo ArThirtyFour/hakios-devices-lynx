@@ -5,7 +5,8 @@
  * for the kernel's lynx_bt driver, which only talks H4 on the same UART.
  *
  * Built only when the phone's own firmware is in ../fw-lynx (build.sh; bt_fw.S): it cannot be redistributed.
- * The NVM's tag 17 byte 1 (the baud rate after the reset; the file's 0x11 = 3.2 Mbaud) is sent as 0 = 115200.
+ * The NVM's tag 17 byte 1 (the baud rate after the reset; the file's 0x11 = 3.2 Mbaud) is sent as 0 = 115200,
+ * and its tag 2 (the address: the file has 00:00:00:00:5a:ad) as the phone's own, which the bootloader's tree has.
  */
 #include <stdint.h>
 #include "log.h"
@@ -78,6 +79,10 @@ static int command(const uint8_t *cmd, uint32_t n, uint32_t us)
     return -1;
 }
 
+/* NVM only (zero_at given): the byte at zero_at goes as 0, and tag 2 (the address, six bytes, the last first) as ours */
+#define NVM_ADDRESS 92u         /* tag 2 begins at 80: id, length 6, eight reserved bytes, then the address */
+static const uint8_t *address;
+
 static int download(const uint8_t *data, uint32_t size, int skip, uint32_t zero_at)
 {
     uint32_t done = 0;
@@ -87,7 +92,12 @@ static int download(const uint8_t *data, uint32_t size, int skip, uint32_t zero_
         int last = done + n == size || n < 243;
 
         seg[0] = 0x01; seg[1] = 0x00; seg[2] = 0xfc; seg[3] = (uint8_t)(n + 2); seg[4] = 0x1e; seg[5] = (uint8_t)n;
-        for (uint32_t i = 0; i < n; i++) seg[6 + i] = done + i == zero_at ? 0 : data[done + i];
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t at = done + i;
+
+            seg[6 + i] = at == zero_at ? 0 : data[at];
+            if (!skip && address && at >= NVM_ADDRESS && at < NVM_ADDRESS + 6) seg[6 + i] = address[5 - (at - NVM_ADDRESS)];
+        }
         if (!put(seg, 6 + n)) return 0;
         done += n;
         if (!skip || last) {
@@ -108,8 +118,8 @@ static void off(void)
     rmw(GPP16 + 4, 12, 0); wait_us(55000); rmw(GPH2 + 4, 1u << 5, 0);
 }
 
-/* 1: the firmware runs and answered HCI_Reset */
-int lynx_bt_up(void)
+/* 1: the firmware runs and answered HCI_Reset. bd_addr: the phone's own address (six bytes as they are read), or 0 */
+int lynx_bt_up(const uint8_t *bd_addr)
 {
     uint32_t psize = (uint32_t)(bt_patch_end - bt_patch), nsize = (uint32_t)(bt_nvm_end - bt_nvm), d, q;
     uint64_t t0;
@@ -117,6 +127,7 @@ int lynx_bt_up(void)
 
     __asm__ volatile("mrs %0,cntfrq_el0" : "=r"(freq));
     t0 = ticks();
+    address = (bd_addr && bt_nvm[80] == 2 && bt_nvm[81] == 0 && bt_nvm[82] == 6) ? bd_addr : 0;
     if (bt_patch[0] != 1 || bt_patch[14] != 3 || bt_nvm[0] != 2 || bt_nvm[135] != 17 || bt_nvm[148] != 0x11) { log_str("bt: not the expected firmware files\n"); return 0; }
     if ((rd(CMU + 0x1000) & 3) != 1 || (rd(CMU + 0x1004) & 3) != 0 || !(rd(CMU + 0x2084) & (1u << 21))) { log_str("bt: APM clock source is not the 394 MHz one\n"); return 0; }
     rmw(CMU + 0x20ac, 0, FORCE); rmw(CMU + 0x20b0, 0, FORCE); rmw(CMU + 0x2100, 0, FORCE); rmw(CMU + 0x211c, 0, FORCE);

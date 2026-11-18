@@ -7,7 +7,7 @@ out/
 lynxrun
 
 # Not ours to publish: the phone's firmware, Android's boot image and kernel, images made from them, iOS
-fw-*/
+fw-*
 *.img
 *.lz4
 *.raw
@@ -16,6 +16,10 @@ fw-*/
 *.dtb
 Image
 identity.h
+
+# The GPU kernel driver in work: adapted from the Pixel 8a port (Martinvlba/hakios-devices-akita), which has no
+# licence yet. Kept out of the repository until its author agrees or it is rewritten (drivers/gpu/NOT-FOR-PUBLICATION.txt)
+drivers/gpu/
 
 # Runs
 *.log

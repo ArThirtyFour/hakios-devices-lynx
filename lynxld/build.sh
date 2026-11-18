@@ -6,6 +6,8 @@
 #                              its xnuloader/identity.h (made from your own IPSW) is compiled in
 #   FW=<directory>             the phone's own firmware, default ../fw-lynx (see README.md). With hpbtfw21.tlv and
 #                              hpnv21.bin in it the loader also starts Bluetooth; without, it is built without it
+#   RETURN_AFTER=<seconds>     a test image: the kernel hands the phone back after that long and the bootloader's
+#                              watchdog restarts it into Android, the kernel's log in ramoops. Default: never
 set -e
 cd "$(dirname "$0")"
 HAKIOS=${HAKIOS:-../../..}
@@ -18,6 +20,7 @@ if [ ! -e "$HAKIOS/xnuloader/identity.h" ]; then
 fi
 F="--target=aarch64-none-elf -mcmodel=tiny -ffreestanding -fno-builtin -fno-stack-protector -mgeneral-regs-only -mstrict-align -Os -Wall -Wextra -DUSB_GADGET_HS_ONLY -I .. -I $HAKIOS/xnuloader"
 ACPM="-include acpm/acpm_lynx_cfg.h"
+[ -z "$RETURN_AFTER" ] || F="$F -DRETURN_AFTER_SECONDS=$RETURN_AFTER"
 
 BT=
 if [ -s "$FW/hpbtfw21.tlv" ] && [ -s "$FW/hpnv21.bin" ]; then

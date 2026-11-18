@@ -1,0 +1,211 @@
+diff --git a/hakios-metal/Makefile b/hakios-metal/Makefile
+index fdd9227..82f97b1 100644
+--- a/hakios-metal/Makefile
++++ b/hakios-metal/Makefile
+@@ -98,9 +98,9 @@ check: test
+ # the kernel's userland/build.sh links)
+ ios: out/ios/libhakios-metal.a $(if $(wildcard $(IR3_CMDLINE_C)),out/ios/hakios-metal-probe)
+ 
+-# The Pixel 8a's Mali-G715 (hakios-kernel devices/akita, HakiosGPU with panthor's interface): hakios_metal.h's subset the
++# The Pixel 7a's Mali-G710 (devices/lynx, HakiosGPU with panthor's interface): hakios_metal.h's subset the
+ # plug-in uses today, by the Mali (src/mali/c_api_mali.cpp; its blit shaders from hakios-kernel's tools/mesa/pan)
+-# Its compiler (src/mali/compile_mali.c: AIR -> NIR -> Mesa 26.2.5's panfrost) is built with the flags of Mesa's iOS build
++# Its compiler (src/mali/compile_mali.c: AIR -> NIR -> Mesa 26.2.6's panfrost) is built with the flags of Mesa's iOS build
+ # and Mesa's archives go into the library with it, all written by hakios-kernel's tools/mesa/pan/mk-pan-ios.sh into
+ # MALI_MESA (HAKIOS= that tree: make ios-mali HAKIOS=../hackios-kernel). The plug-in that links the library adds -lz.
+ MALI_OUT      = out/ios-mali$(ARCHSFX)
+diff --git a/hakios-metal/src/mali/blit_shaders.h b/hakios-metal/src/mali/blit_shaders.h
+index f509c4a..23d2765 100644
+--- a/hakios-metal/src/mali/blit_shaders.h
++++ b/hakios-metal/src/mali/blit_shaders.h
+@@ -1,4 +1,6 @@
+-/* made by hakios-kernel's tools/mesa/pan/pan_blit_shaders.c: Mesa 26.2.5's panfrost compiler for the Mali-G715 (GPU_ID 0xb8a21020). Push constants: dst @0, src @8, value @16, count @20 (copy_rows_u32: strides @24 @28); 64 invocations a workgroup. */
++/* made by hakios-kernel's tools/mesa/pan/pan_blit_shaders.c: Mesa 26.2.6's panfrost compiler for the Mali-G715 (GPU_ID 0xb8a21020).
++ * (v10 port: these are arch-11 shader binaries; the Pixel 7a's Mali-G710 wants the same shaders compiled for GPU_ID 0xa8620004
++ * -- rerun hakios-kernel's tools/mesa/pan/pan_blit_shaders.c with that ID and paste the output here.) Push constants: dst @0, src @8, value @16, count @20 (copy_rows_u32: strides @24 @28); 64 invocations a workgroup. */
+ #pragma once
+ #include <stdint.h>
+ struct mali_blit_shader { unsigned work_regs; uint64_t preload; unsigned fau_words; unsigned size; uint8_t code[1024]; };
+diff --git a/hakios-metal/src/mali/c_api_mali.cpp b/hakios-metal/src/mali/c_api_mali.cpp
+index 6be2833..1318c18 100644
+--- a/hakios-metal/src/mali/c_api_mali.cpp
++++ b/hakios-metal/src/mali/c_api_mali.cpp
+@@ -1,4 +1,4 @@
+-// hakios_metal.h on the Pixel 8a's Mali-G715 (hakios-kernel devices/akita: HakiosGPU with Linux's panthor interface):
++// hakios_metal.h on the Pixel 7a's Mali-G710 (devices/lynx: HakiosGPU with Linux's panthor interface):
+ // what the Metal plug-in (plugin/HakiosMetal.m) asks of the GPU today -- the device, buffers, queues, command buffers
+ // with blit copies and fills -- done by the Mali. Built instead of src/c_api.cpp (`make ios-mali`); the Adreno's
+ // classes are not in it.
+@@ -6,7 +6,7 @@
+ //   device          HakiosGPU opened (its "DRMDriver" property says panthor), a VM, one group with one queue
+ //   buffer          a BO of the service, write-combined for the processors, bound into the VM at an address of ours
+ //   command buffer  its copies and fills recorded; at commit one command stream of the GPU's (in a BO of its own)
+-//                   dispatches the blit shaders (src/mali/blit_shaders.h: Mesa 26.2.5's compiler for the G715, made by
++//                   dispatches the blit shaders (src/mali/blit_shaders.h: Mesa 26.2.6's compiler for the G710, made by
+ //                   hakios-kernel's tools/mesa/pan/pan_blit_shaders.c), each after a WAIT for the one before, and is
+ //                   submitted with a sync object; the queue's thread waits for it, sets the status, runs the callback
+ //
+@@ -104,11 +104,15 @@ fail(const char *format, ...)
+     gError = text;
+ }
+ 
+-// ---- the GPU's command stream (v11: v10's instructions with v12's scoreboard state; as hakios-kernel's mali_test) ----
++// ---- the GPU's command stream (v10: the Valhall instruction set with v10's scoreboard state -- SET_SB_ENTRY, one
++// instruction, where arch 11 needed v12's five SET_STATE_IMM32 words; as Mesa's panvk v10 queue and hakios-kernel's
++// mali_test) ----
+ inline uint64_t move48(unsigned r, uint64_t v) { return 1ULL << 56 | (uint64_t)r << 48 | (v & 0xffffffffffffULL); }
+ inline uint64_t move32(unsigned r, uint32_t v) { return 2ULL << 56 | (uint64_t)r << 48 | v; }
+-inline uint64_t set_state(unsigned state, uint32_t v) { return 28ULL << 56 | (uint64_t)state << 32 | v; }
+-constexpr uint64_t RUN_COMPUTE = 4ULL << 56 | 1, WAIT_ALL = 3ULL << 56 | 0xffffULL << 16;
++// SET_SB_ENTRY (opcode 23): scoreboard EP tracks endpoint tasks, OTHER tracks load/store ones -- on v10 the only way to
++// select either, and the "other" entry is always the load/store slot (0), as panvk's cs_set_scoreboard_entry asserts.
++inline uint64_t set_sb_entry(unsigned ep, unsigned other) { return 23ULL << 56 | (uint64_t)other << 4 | ep; }
++constexpr uint64_t RUN_COMPUTE = 4ULL << 56 | 1, WAIT_ALL = 3ULL << 56 | 0xffULL << 16;   /* (v10: eight scoreboards) */
+ 
+ }  // namespace
+ 
+@@ -1170,6 +1174,8 @@ hierarchyMask(unsigned w, unsigned h, unsigned levels)
+ // tiler context (fresh: an empty polygon list), the framebuffer descriptor and render target, the blend descriptor, the
+ // stages' push constants, the fragment stage's resource table; then RUN_IDVS, FINISH_TILING, RUN_FRAGMENT, each after a
+ // WAIT for the one before. Registers in v11's layout (upstream Mesa's genxml v11.xml: v10's plus TILER_FLAGS2 at r61);
++// (v10 port: r61 TILER_FLAGS2 below must go -- arch 10 has registers only to PRIMITIVE_SIZE r60 -- and the DCD/DCD2
++// fields re-checked against v10.xml; the v10 register set is TILER_FLAGS 56, DCD0 57, DCD1 58, PRIMITIVE_SIZE 60)
+ // what each value is, hakios-kernel's the port's log ("render pipelines") and userland/src/mali_test.c.
+ uint64_t drawBytes(const DrawJob &dj);
+ 
+@@ -1379,10 +1385,10 @@ emitIr(hakios_metal_device *d, const DrawJob &dj, uint8_t *pass_area, uint64_t p
+     h[k++] = move48(44, 0);
+     h[k++] = move32(46, 0);
+     h[k++] = wait_on(1);
+-    h[k++] = set_state(0, 4);                                                   // endpoint work on scoreboard 4
++    h[k++] = set_sb_entry(4, 0);                                                // endpoint work on scoreboard 4
+     h[k++] = 7ULL << 56;                                                        // RUN_FRAGMENT
+     h[k++] = wait_on(1 << 4);
+-    h[k++] = set_state(0, 3);
++    h[k++] = set_sb_entry(3, 0);                                                // ... and back on 3
+     h[k++] = move48(78, pass_va);
+     h[k++] = 20ULL << 56 | 62ULL << 48 | 78ULL << 40 | 0xfULL << 16 | 40;      // LOAD_MULTIPLE r62-r65 <- the completed chunks
+     h[k++] = wait_on(1);
+@@ -1584,7 +1590,7 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
+     // A PASS OPENED (11-10): the texture caches dropped first (and the load/store caches cleaned) -- what an earlier pass
+     // of this command buffer wrote back is in L2, but a texture cache may still hold that memory as it was before:
+     // CoreAnimation's blur samples the passes before it (the tester's slow-motion clip: frames partly unblurred and
+-    // streaked mid-swipe). Passes were only ordered (WAIT_ALL). This Mali (v11) does not invalidate them at RUN_FRAGMENT
++    // streaked mid-swipe). Passes were only ordered (WAIT_ALL). This Mali (v10) does not invalidate them at RUN_FRAGMENT
+     // (v13+ does, implicitly; Arm's own driver forces it before every fragment job -- Mesa's panvk, IMPLICIT_OTHERS_INV).
+     // A pass that loads its targets has the same flush before its preload, below. metal_passinv=0: not done (a test).
+     static const bool pass_inv = [] {
+@@ -1743,7 +1749,8 @@ emitDraw(hakios_metal_device *d, const DrawJob &dj, uint8_t *area, uint64_t area
+     s[n++] = move32(57, dj.dcd0);
+     s[n++] = move32(58, dj.dcd1);
+     s[n++] = move32(60, 0x3f800000);                                            // primitive size 1.0
+-    s[n++] = move32(61, 0);                                                     // TILER_FLAGS2: VRS 1x1
++    s[n++] = move32(61, 0);                                                     // TILER_FLAGS2: VRS 1x1 (v11; v10 has no r61 --
++                                                                                // harmless to write, but drop it for arch 10)
+     if (!dj.clear_only) {                                                       // (a clear: the fragment job alone)
+         if (first && !dj.load) {                                                // (started already by the preload)
+             s[n++] = 49ULL << 56 | 0ULL << 32;                                  // HEAP_OPERATION: vertex/tiler started
+@@ -2143,7 +2150,7 @@ hakios_metal_error(void)
+ }
+ 
+ /*
+- * The kernel starts the Mali mali_delay (8) s after its own start, once the firmware's file can be read: on the Pixel 8a
++ * The kernel starts the Mali mali_delay (8) s after its own start, once the firmware's file can be read: on the Pixel 7a
+  * HakiosGPU appears about 20 s into the boot, after backboardd has asked for its device (15 s) -- and a window server
+  * without one composites in software for good. With the GPU kept (mali_keep, mali= among the boot-args) the service is
+  * waited for, up to 15 s; without it the answer is at once, as before.
+@@ -2614,11 +2621,7 @@ hakios_metal_cb_commit(hakios_metal_cb *cb, void (*callback)(hakios_metal_cb *cb
+         } else {
+             auto *s = (uint64_t *)cb->stream.cpu;
+             unsigned n = 0;
+-            s[n++] = set_state(0, 3);           // v11's scoreboards, as panvk sets them up
+-            s[n++] = set_state(9, 0x8);
+-            s[n++] = set_state(1, 0);
+-            s[n++] = set_state(2, 1);
+-            s[n++] = set_state(8, 0xf0);
++            s[n++] = set_sb_entry(3, 0);            // v10's scoreboard: endpoint 3, load/store 0 (panvk's queue init)
+             // the GPU's caches made to see what the CPU wrote, and (at the end) to show the CPU what the GPU wrote, as
+             // gallium's panfrost ends a batch: L2 and load/store cleaned, the others (the tiler's, descriptors')
+             // invalidated. Without it a queue drew its first render pass only: later passes found the tiler heap and
+@@ -4825,7 +4828,8 @@ zsOf(const struct hakios_metal_render_pass *pass, DrawJob &dj, unsigned width, u
+     memset(w, 0, 32);
+     w[0] = 7 | 7u << 4 | 7u << 16;                     // stencil faces: always (no test)
+     // (word 4: v11's separated dependency tracking 21, depth cull 22, clamp mode [0, 1] (1) at 23, depth from fixed
+-    // function (2) at 25 -- the two genxml defaults that are not zero, without which the depth test did nothing)
++    // function (2) at 25 -- the two genxml defaults that are not zero, without which the depth test did nothing;
++    // v10 port: these bit positions are arch-11's, check them against v10.xml's depth/stencil descriptor)
+     const uint32_t w4 = 1u << 21 | 1u << 22 | 1u << 23 | 2u << 25;
+     w[4] = w4 | 7u << 29;                               // depth: always, nothing written
+     if (!draw) {
+@@ -4985,7 +4989,7 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
+     else if (pass->visibility && pass->visibility_mode) refused = "visibility results (not on the Mali yet)";
+     else if (!p->blend_refusal.empty()) refused = p->blend_refusal.c_str();
+     else if (!compileFetch(p)) refused = p->fetch_refusal.c_str();
+-    else if (p->samples == 2) refused = "2 samples a pixel (the Mali-G715 has no 2x sample pattern -- Mesa serves it from v12; 4 is served)";
++    else if (p->samples == 2) refused = "2 samples a pixel (the Mali has no 2x sample pattern -- Mesa serves it from v12; 4 is served)";
+     else if (t->samples != p->samples) refused = "a colour attachment of another sample count than the pipeline's rasterSampleCount";
+     else if (primitive > 4) refused = "a primitive type past MTLPrimitiveTypeTriangleStrip";
+     else if (instance_count == 0) refused = "no instances";
+@@ -5474,7 +5478,8 @@ drawImpl(hakios_metal_cb *cb, hakios_metal_program *p, const struct hakios_metal
+     dj.count = vertex_count;
+     dj.instances = instance_count;
+     dj.vertex_start = ix ? (unsigned)ix->base_vertex : vertex_start;
+-    // DCD0: scissor to the bounding box, cull zero area (v11); the face culled and the front's winding.
++    // DCD0: scissor to the bounding box, cull zero area (v11; v10 port: DCD0's fields are in v10.xml, check the two
++    // "scissor" and "cull" bits there); the face culled and the front's winding.
+     // THE WINDING AS METAL NAMES IT (11-13): Metal's clockwise is clockwise as the target shows the triangle (y down),
+     // and so is the Mali's "front face CCW" (panvk sets it from Vulkan's framebuffer-space winding, which is that
+     // too). From 11-10 until now it was FLIPPED here, on the strength of sb_cube=1's cube -- CoreAnimation layers,
+@@ -6079,7 +6084,7 @@ hakios_metal_texture_new_multisample(hakios_metal_device *d, unsigned pixel_form
+         return hakios_metal_texture_new(d, 2, pixel_format, width, height, usage);
+     }
+     if (samples != 4) {
+-        fail("a multisample texture of %u samples (the Mali-G715 has no 2x sample pattern -- Mesa serves it from v12; 4 is "
++        fail("a multisample texture of %u samples (the Mali has no 2x sample pattern -- Mesa serves it from v12; 4 is "
+             "served)", samples);
+         return nullptr;
+     }
+diff --git a/hakios-metal/src/mali/compile_mali.c b/hakios-metal/src/mali/compile_mali.c
+index b50691b..43e0304 100644
+--- a/hakios-metal/src/mali/compile_mali.c
++++ b/hakios-metal/src/mali/compile_mali.c
+@@ -1,5 +1,5 @@
+ /*
+- * The Mali build's shader compiler: a Metal compute function's AIR compiled for the Pixel 8a's Mali-G715 (see
++ * The Mali build's shader compiler: a Metal compute function's AIR compiled for the Pixel 7a's Mali-G710 (see
+  * compile_mali.h for what the code expects of the dispatch). hakios-kernel's tools/mesa/pan/air_pan.c as a library:
+  *
+  *   AIR -> air_to_nir (tools/mesa/air, the function constants applied)
+@@ -9,7 +9,7 @@
+  *          hardware runs whole threadgroups, Metal runs only the grid's threads)
+  *       -> pan_preprocess_nir, pan_postprocess_nir
+  *       -> threads_per_threadgroup and threadgroups_per_grid from push constants (as panvk's sysvals)
+- *       -> pan_shader_compile, GPU_ID 0xb8a21020, the first MALI_KERNEL_RESERVED push-constant words the driver's
++ *       -> pan_shader_compile, GPU_ID 0xa8620004, the first MALI_KERNEL_RESERVED push-constant words the driver's
+  *
+  * Threadgroup memory (wls_size, the static arrays; a [[threadgroup(0)]] argument lies past them, sized by the encoder)
+  * and spilled registers (tls_size, per thread) are the dispatch's to provide: c_api_mali.cpp's local storage descriptor.
+@@ -43,7 +43,8 @@
+ 
+ #include "compile_mali.h"
+ 
+-#define GPU_ID          0xb8a21020ULL
++#define GPU_ID          0xa8620004ULL      /* lynx: the Pixel 7a's Mali-G710 (arch 10), as the phone's GPU_ID register reads;
++                                           * the Pixel 8a's Mali-G715 (arch 11) is 0xb8a21020, which this file was written for */
+ 
+ static void
+ say(char *error, size_t error_size, const char *format, ...)
+diff --git a/hakios-metal/src/mali/compile_mali.h b/hakios-metal/src/mali/compile_mali.h
+index fd4b275..61833d8 100644
+--- a/hakios-metal/src/mali/compile_mali.h
++++ b/hakios-metal/src/mali/compile_mali.h
+@@ -1,7 +1,7 @@
+ /*
+  * The Mali build's shader compiler (src/mali/compile_mali.c): a Metal compute function's AIR bitcode compiled for the
+- * Pixel 8a's Mali-G715 -- hakios-kernel's AIR front end (tools/mesa/air) into NIR, Metal's buffers made addresses, Mesa
+- * 26.2.5's panfrost compiler for arch 11. The chain of hakios-kernel's tools/mesa/pan/air_pan.c, as a library.
++ * Pixel 7a's Mali-G710 -- hakios-kernel's AIR front end (tools/mesa/air) into NIR, Metal's buffers made addresses, Mesa
++ * 26.2.6's panfrost compiler for arch 10. The chain of hakios-kernel's tools/mesa/pan/air_pan.c, as a library.
+  *
+  * What the code expects of the dispatch (src/mali/c_api_mali.cpp), its push constants (FAU, 32-bit words):
+  *

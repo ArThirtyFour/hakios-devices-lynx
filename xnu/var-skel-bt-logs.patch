@@ -1,0 +1,17 @@
+diff --git a/userland/build.sh b/userland/build.sh
+index 0a08cc4..03b444a 100755
+--- a/userland/build.sh
++++ b/userland/build.sh
+@@ -549,6 +549,12 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
+ 	# the prefix with the root on the flash, downloads every package and index there, and without it each
+ 	# download ended in "No such file or directory"
+ 	printf 'd\t700\t501\t501\t/private/var/mobile/tmp\n' >> root/etc/var.skel
++	# bluetoothd's own logs: it opens /private/var/mobile/Library/Logs/Bluetooth and its subdirectories at start
++	# (t6: "Logs/Bluetooth: errno 2" without them) and a build of the data volume from the template has no such
++	# directory
++	for btlog in Bluetooth Bluetooth/Accessory Bluetooth/AccessoryCrash; do
++		printf 'd\t775\t501\t501\t/private/var/mobile/Library/Logs/%s\n' "$btlog" >> root/etc/var.skel
++	done
+ 	# Metal's compiled shader stages (HakiosMetalCA.m: HM_CACHE_DIR): in /var/db so that var_store keeps them (it
+ 	# leaves tmp out), open to every user like tmp, since the window server may not be root
+ 	printf 'd\t1777\t0\t0\t/private/var/db/hakios-metal-cache\n' >> root/etc/var.skel

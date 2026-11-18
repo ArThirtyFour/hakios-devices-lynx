@@ -35,6 +35,14 @@ acpmprobe|tpower|tspi)
 	acpm ;;
 btprobe)
 	;;
+gpuprobe)
+	clang $A -c vec.S -o "$OUT/vec.o"
+	OBJS="$OBJS $OUT/vec.o" ;;
+gpumcu)
+	need mali_csffw-r54p3.bin
+	clang $A -c vec.S -o "$OUT/vec.o"
+	clang $A -I "$FW" -c gpu_fw.S -o "$OUT/gpu_fw.o"
+	OBJS="$OBJS $OUT/vec.o $OUT/gpu_fw.o" ;;
 btfw)
 	need hpbtfw21.tlv hpnv21.bin
 	clang $A -I "$FW" -c bt_fw.S -o "$OUT/bt_fw.o"
@@ -46,7 +54,7 @@ pcieprobe)
 	clang $A -I "$FW" -c wifi_fw.S -o "$OUT/wifi_fw.o"
 	OBJS="$OBJS $OUT/vec.o $OUT/wifi_fw.o" ;;
 *)
-	echo "usage: probes/build.sh acpmprobe|tpower|tspi|btprobe|btfw|pcieprobe" >&2
+	echo "usage: probes/build.sh acpmprobe|tpower|tspi|btprobe|btfw|pcieprobe|gpuprobe|gpumcu" >&2
 	exit 2 ;;
 esac
 

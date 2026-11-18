@@ -1,0 +1,17 @@
+diff --git a/drivers/bluetooth/hakios.bthost.c b/drivers/bluetooth/hakios.bthost.c
+index a96dd6c..b33fddb 100644
+--- a/drivers/bluetooth/hakios.bthost.c
++++ b/drivers/bluetooth/hakios.bthost.c
+@@ -41,7 +41,12 @@ extern bool hakios_btsk_uuid(uuid_t out);
+ extern void hakios_btsk_deliver(const uint8_t *bytes, unsigned length);
+ void hakios_bthost_written(const uint8_t *bytes, unsigned length);    /* called by redwood_btsk.c with what bluetoothd wrote */
+ 
++#ifdef HAKIOS_LYNX_BT
++extern void lynx_tlog(const char *fmt, ...) __printflike(1, 2);
++#define say(fmt, ...) lynx_tlog("bthost: " fmt "\n", ##__VA_ARGS__)
++#else
+ #define say(fmt, ...) printf("bthost: " fmt "\n", ##__VA_ARGS__)
++#endif
+ 
+ #define SKEL_TXQ                8192u           /* what bluetoothd has written and the controller has not been given yet */
+ #define SKEL_FRAME              4096u           /* one packet from the controller */

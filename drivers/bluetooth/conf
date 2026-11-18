@@ -2,5 +2,6 @@
 
 driver LYNX_BT
 	file    bsd/dev/hakios.lynx_bt.c
-	help    the Pixel 7a Bluetooth: WCN6740 on the APM USI1 UART, started by lynxld; step one, the transport and a look
-	help    at the air (lynx_bt=1). Nothing Darwin can use yet
+	requires BT_HOST
+	help    the Pixel 7a Bluetooth: WCN6740 on the APM USI1 UART, started by lynxld (lynx_bt=1): the transport of
+	help    whole H4 packets under BT_HOST, which is iOS's bluetoothd's side; vendor commands are kept from the chip

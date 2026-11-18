@@ -39,7 +39,14 @@
 #define CHUNK    0x800000u
 #define WDT0 0x10060000ull
 #define WDT1 0x10070000ull
-#define RETURN_AFTER "0"        /* seconds the kernel runs before it hands the phone back; 0: never (loader_return.c), the long power key ends the run */
+/* Seconds the kernel runs before it hands the phone back (loader_return_after); 0: never, the long power key ends the
+ * run. build.sh: RETURN_AFTER=<seconds> for a test image that comes back to Android with its log by itself. */
+#ifndef RETURN_AFTER_SECONDS
+#define RETURN_AFTER_SECONDS 0
+#endif
+#define RETURN_STR2(x) #x
+#define RETURN_STR(x) RETURN_STR2(x)
+#define RETURN_AFTER RETURN_STR(RETURN_AFTER_SECONDS)
 #define PAGE16K          0x4000ull
 #define PRAM_BASE        0xfd600000ull      /* inside the reserved ramoops pmsg zone */
 #define PRAM_SIZE        0x80000u
@@ -56,7 +63,7 @@ void lynx_other_cpu_entry(void);
 int lynx_touch_up(void);
 void lynx_cpu_fast(void);
 #ifdef LYNX_BT          /* build.sh: the phone's Bluetooth firmware is in ../fw-lynx */
-int lynx_bt_up(void);
+int lynx_bt_up(const uint8_t *bd_addr);
 #define BT_ARG "lynx_bt=1 "
 #else
 #define BT_ARG ""
@@ -237,7 +244,8 @@ static uint64_t receive_system(uint64_t dest)
     for (int i = 0; i < 8; i++) if (hd[i] != (uint8_t)m[i]) return 0;
     uint64_t len = 0;
     for (int i = 0; i < 8; i++) len |= (uint64_t)hd[8 + i] << (8 * i);
-    if (!len || len > 0xd0000000ull) return 0;
+    /* Leave room for the device tree, boot arguments and the kernel's bootstrap allocations. */
+    if (!len || len > WIN_SIZE - RESIDENT_OFF - 0x08000000ull) return 0;
     uint64_t off = 0;
     while (off < len) {
         uint64_t rem = len - off; uint32_t n = rem > CHUNK ? CHUNK : (uint32_t)((rem + 511) & ~511ull);
@@ -248,11 +256,69 @@ static uint64_t receive_system(uint64_t dest)
     return off >= len ? len : 0;
 }
 
+/*
+ * The phone's own addresses, from the device tree the bootloader gave us: /chosen/config has "wlan_mac1" and
+ * "bt_addr" as text ("5C:33:7B:..:..:..", what Android reads too). 1 with the six bytes, 0 if the tree has none
+ * (the caller then keeps a made-up, locally administered address).
+ */
+static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static int hexval(uint8_t c) { return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'f' ? (c | 32) - 'a' + 10 : -1; }
+static int name_is(const uint8_t *a, uint32_t room, const char *b) { while (*b) { if (!room || *a++ != (uint8_t)*b++) return 0; room--; } return room && *a == 0; }
+
+static int fdt_mac(uint64_t fdt, const char *property, uint8_t out[6])
+{
+    const uint8_t *d = (const uint8_t *)(uintptr_t)fdt;
+    uint32_t total, at, strings, depth = 0, chosen = 0, config = 0;
+
+    if (fdt == 0 || (fdt & 3) || be32(d) != 0xd00dfeedu) return 0;
+    total = be32(d + 4); at = be32(d + 8); strings = be32(d + 12);
+    if (total < 40 || total > 0x400000 || at >= total || strings >= total) return 0;
+    while (at + 4 <= total) {
+        uint32_t token = be32(d + at);
+
+        at += 4;
+        if (token == 1) {                               /* a node: its name, padded */
+            const uint8_t *name = d + at;
+
+            depth++;
+            if (depth == 2) chosen = name_is(name, total - at, "chosen");
+            if (depth == 3) config = chosen && name_is(name, total - at, "config");
+            while (at < total && d[at]) at++;
+            if (at == total) return 0;
+            at = (at + 4) & ~3u;
+        } else if (token == 2) {
+            if (depth == 3) config = 0;
+            if (depth == 2) chosen = 0;
+            if (depth-- == 0) return 0;
+        } else if (token == 3) {                        /* a property: length, name offset, value */
+            if (total - at < 8) return 0;
+            uint32_t length = be32(d + at), offset = be32(d + at + 4);
+            if (length > total - at - 8 || offset >= total - strings) return 0;
+            uint32_t name = strings + offset;
+            const uint8_t *v = d + at + 8;
+
+            if (depth == 3 && config && length >= 17 && name_is(d + name, total - name, property)) {
+                for (int i = 0; i < 6; i++) {
+                    int h = hexval(v[3 * i]), l = hexval(v[3 * i + 1]);
+
+                    if (h < 0 || l < 0 || (i < 5 && v[3 * i + 2] != ':')) return 0;
+                    out[i] = (uint8_t)(h << 4 | l);
+                }
+                return (out[0] | out[1] | out[2] | out[3] | out[4] | out[5]) != 0 && !(out[0] & 1);
+            }
+            at = (at + 8 + length + 3) & ~3u;
+        } else if (token != 4) {
+            return 0;                                   /* the end (9), or not a tree */
+        }
+    }
+    return 0;
+}
+
 void lynxld_main(uint64_t fdt, uint64_t self)
 {
     uint64_t base = self - LOADER_OFF, mpidr, cntfrq;
     log_init();
-    log_str("LYNXLD v20\n");
+    log_str("LYNXLD v21\n");
     log_hex("fdt", fdt); log_hex("imgbase", base);
     log_flush();
 
@@ -339,7 +405,13 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                            .end = (uint8_t *)(uintptr_t)(dt_pa + dt_max) };
     uint8_t seed[64];
     for (unsigned i = 0; i < sizeof(seed); i++) seed[i] = (uint8_t)(i * 37 + (self >> (i & 7)));
-    static const uint8_t wifi[6] = { 0x02, 0x4c, 0x59, 0x4e, 0x00, 0x01 }, bt[6] = { 0x02, 0x4c, 0x59, 0x4e, 0x00, 0x02 };
+    /* the phone's own addresses when the bootloader's tree has them; made-up, locally administered ones otherwise */
+    static uint8_t wifi[6] = { 0x02, 0x4c, 0x59, 0x4e, 0x00, 0x01 }, bt[6] = { 0x02, 0x4c, 0x59, 0x4e, 0x00, 0x02 };
+    uint8_t mac[6];
+    if (fdt_mac(fdt, "wlan_mac1", mac)) for (int i = 0; i < 6; i++) wifi[i] = mac[i];
+    if (fdt_mac(fdt, "bt_addr", mac)) for (int i = 0; i < 6; i++) bt[i] = mac[i];
+    log_hex("wifi_mac", (uint64_t)wifi[0] << 40 | (uint64_t)wifi[1] << 32 | (uint64_t)wifi[2] << 24 | wifi[3] << 16 | wifi[4] << 8 | wifi[5]);
+    log_hex("bt_mac", (uint64_t)bt[0] << 40 | (uint64_t)bt[1] << 32 | (uint64_t)bt[2] << 24 | bt[3] << 16 | bt[4] << 8 | bt[5]);
     static const uint8_t hash[48] = { 'l', 'y', 'n', 'x' }, behavior[16] = { 0 };
     uint8_t nvram[NVRAM_BANK_SIZE];
     build_nvram_image(nvram);
@@ -473,7 +545,11 @@ void lynxld_main(uint64_t fdt, uint64_t self)
     log_hex("touch_up", (uint64_t)lynx_touch_up()); log_flush();
     lynx_cpu_fast();
 #ifdef LYNX_BT
-    log_hex("bt_up", (uint64_t)lynx_bt_up()); log_flush();
+    {
+        static uint8_t bt_mac[6];
+
+        log_hex("bt_up", (uint64_t)lynx_bt_up(fdt_mac(fdt, "bt_addr", bt_mac) ? bt_mac : 0)); log_flush();
+    }
 #endif
     (void)mpidr;
     other_go[0] = plan.entry + slide;

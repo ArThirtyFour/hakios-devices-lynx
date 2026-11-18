@@ -1,0 +1,8 @@
+# devices/lynx/drivers/audio/conf: the Pixel 7a's speaker amplifiers (docs/drivers-config.md, docs/porting/drivers.md):
+# two Cirrus Logic CS35L41s on SPI, fed by the AoC's TDM_0 port (drivers/aoc).
+
+driver LYNX_AMP
+	file    bsd/dev/hakios.lynx_amp.c
+	help    the Pixel 7a's speaker amplifiers: two CS35L41s on PERIC0 USI7 SPI (spi@10960000), the left on the
+	help    controller's own chip select, the right on a GPIO one (gpp22-1); both reset, their OTP boot, device and
+	help    revision ids, then set up for the AoC's TDM_0 (amp=N; speaker=1 lets lynx_amp_speaker(1) power them up)

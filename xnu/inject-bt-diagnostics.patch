@@ -1,0 +1,476 @@
+diff --git a/userland/src/inject_bt.c b/userland/src/inject_bt.c
+index 7c64c5d..473ed94 100644
+--- a/userland/src/inject_bt.c
++++ b/userland/src/inject_bt.c
+@@ -13,11 +13,18 @@
+ #include <fcntl.h>
+ #include <stdint.h>
+ #include <stdio.h>
++#include <dirent.h>
++#include <dlfcn.h>
++#include <errno.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <mach-o/dyld.h>
+ #include <sys/ioctl.h>
++#include <sys/mman.h>
+ #include <sys/socket.h>
++#include <sys/stat.h>
++#include <time.h>
+ 
+ /* (XNU's sys/kern_control.h and sys/sys_domain.h, which the SDK this is built with does not have) */
+ #ifndef SYSPROTO_CONTROL
+@@ -42,6 +49,7 @@ extern void xpc_connection_resume(xpc_connection_t connection);
+ extern void xpc_connection_send_message(xpc_connection_t connection, xpc_object_t message);
+ extern const struct _xpc_type_s *xpc_get_type(xpc_object_t object);
+ extern xpc_object_t xpc_dictionary_create_reply(xpc_object_t original);
++extern bool xpc_dictionary_apply(xpc_object_t object, bool (^applier)(const char *key, xpc_object_t value));
+ extern void xpc_dictionary_set_int64(xpc_object_t xdict, const char *key, int64_t value);
+ extern void xpc_dictionary_set_string(xpc_object_t xdict, const char *key, const char *string);
+ extern char *xpc_copy_description(xpc_object_t object);
+@@ -58,6 +66,8 @@ say(const char *line)
+ 	}
+ }
+ 
++static void say_chunked(const char *label, const char *text, size_t length);
++
+ __attribute__((constructor))
+ static void
+ bluetool_serves(void)
+@@ -80,9 +90,22 @@ bluetool_serves(void)
+ 			}
+ 			char *text = xpc_copy_description(message), line[600];
+ 
+-			snprintf(line, sizeof(line), "hakios: BlueTool: asked %s\n", text != NULL ? text : "(?)");
++			snprintf(line, sizeof(line), "hakios: BlueTool: asked\n");
+ 			say(line);
++			if (text != NULL) {
++				/* (t9: the request has two keys and the kernel log cut the description at 400 characters --
++				 * the keys are what says whether this is "boot", "init", a power state or something else) */
++				say_chunked("BlueTool-asked: ", text, strlen(text));
++			}
+ 			free(text);
++			xpc_dictionary_apply(message, ^bool(const char *key, xpc_object_t value) {
++				char line[400], *shown = xpc_copy_description(value);
++
++				snprintf(line, sizeof(line), "BlueTool-key: %s = %s\n", key, shown != NULL ? shown : "(?)");
++				say(line);
++				free(shown);
++				return true;
++			});
+ 			xpc_object_t reply = xpc_dictionary_create_reply(message);
+ 
+ 			if (reply != NULL) {
+@@ -142,3 +165,411 @@ wait_for_transport(void)
+ 	}
+ 	say("hakios: bluetoothd: no controller transport after two minutes; started anyway\n");
+ }
++
++/*
++ * ---- why bluetoothd exits ----
++ * t5 (2026-11-18): every start got through the standard HCI setup (Reset, the Read commands, Set Event Mask, LE on, Host
++ * Buffer Size, Set Controller To Host Flow Control), the control channel then closed and launchd logged "exited due to
++ * exit(1)" a second later, with nothing said on the console. A second is the sleep in front of one of bluetoothd's own
++ * _exit(1) calls; which one is what this says. Both exit functions are interposed (DYLD_INTERPOSE), so a call from
++ * bluetoothd comes here first: the status, the address it was called from (bluetoothd is a PIE: take the slide below and
++ * 0x100000000 off it for the address in the file), a backtrace, and the log bluetoothd keeps for itself,
++ * /private/var/mobile/Library/Logs/Bluetooth, whose last 12 KB are copied here.
++ */
++extern int backtrace(void **buffer, int size);
++
++static void
++say_chunked(const char *label, const char *text, size_t length)
++{
++	while (length != 0) {
++		char line[260];
++		size_t part = length > 180 ? 180 : length;
++		int made = snprintf(line, sizeof(line), "%s%.*s\n", label, (int)part, text);
++
++		if (made > 0) {
++			say(line);
++		}
++		text += part;
++		length -= part;
++	}
++}
++
++static void
++say_file(const char *path, const char *name)
++{
++	char line[400], buf[1024];
++	struct stat st;
++	ssize_t got;
++	int fd = open(path, O_RDONLY);
++
++	if (fd < 0) {
++		snprintf(line, sizeof(line), "bluetoothd-why: %s: cannot open (errno %d)\n", name, errno);
++		say(line);
++		return;
++	}
++	if (fstat(fd, &st) != 0) {
++		close(fd);
++		return;
++	}
++	snprintf(line, sizeof(line), "bluetoothd-why: %s: %lld bytes\n", name, (long long)st.st_size);
++	say(line);
++	if (!S_ISREG(st.st_mode)) {
++		close(fd);
++		return;
++	}
++	if (lseek(fd, st.st_size > 12288 ? st.st_size - 12288 : 0, SEEK_SET) < 0) {
++		close(fd);
++		return;
++	}
++	while ((got = read(fd, buf, sizeof(buf))) > 0) {
++		say_chunked("bluetoothd-log: ", buf, (size_t)got);
++	}
++	close(fd);
++}
++
++static void
++say_bt_logs(const char *when)
++{
++	/* (t9: the reason file the fatal path writes on an internal build is in the first; the crash reporter's
++	 * directories are read too, in case the daemon went the abort_with_payload way instead) */
++	static const char *const directories[] = { "/private/var/mobile/Library/Logs/Bluetooth",
++		"/private/var/mobile/Library/Logs/CrashReporter", "/private/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs" };
++	char line[300];
++
++	for (unsigned d = 0; d < sizeof(directories) / sizeof(directories[0]); d++) {
++		const char *directory = directories[d];
++		DIR *dir = opendir(directory);
++
++		if (dir == NULL) {
++			snprintf(line, sizeof(line), "bluetoothd-why: %s: %s: errno %d\n", when, directory, errno);
++			say(line);
++			continue;
++		}
++		snprintf(line, sizeof(line), "bluetoothd-why: %s: %s is there\n", when, directory);
++		say(line);
++		for (struct dirent *entry; (entry = readdir(dir)) != NULL; ) {
++			char path[512], name[400];
++
++			if (entry->d_name[0] == '.') {
++				continue;
++			}
++			snprintf(path, sizeof(path), "%s/%s", directory, entry->d_name);
++			snprintf(name, sizeof(name), "%s/%s", directory + 19 /* ("/private/var/mobile") */, entry->d_name);
++			say_file(path, name);
++		}
++		closedir(dir);
++	}
++}
++
++static void
++say_hex_around(const char *label, const void *at, unsigned before, unsigned length)
++{
++	const unsigned char *p = (const unsigned char *)at - before;
++
++	for (unsigned i = 0; i < length; i += 24) {
++		char line[200];
++		int used = snprintf(line, sizeof(line), "%s %p:", label, (const void *)(p + i));
++
++		for (unsigned j = 0; j < 24 && i + j < length; j++) {
++			used += snprintf(line + used, sizeof(line) - (size_t)used, " %02x", p[i + j]);
++		}
++		snprintf(line + used, sizeof(line) - (size_t)used, "\n");
++		say(line);
++	}
++}
++
++static void
++bluetoothd_dying(int status, void *from, const char *which)
++{
++	char line[320];
++	intptr_t slide = (intptr_t)_dyld_get_image_vmaddr_slide(0);
++	void *frames[24];
++	int count = backtrace(frames, 24);
++	Dl_info where;
++
++	/* (t7: the addresses of t6's exits were in no part of bluetoothd's own code -- 0x100868238, 0x1008cb520,
++	 * 0x100b9f098, and every one of them moved with the slide -- so the caller is another image. dladdr names it.) */
++	snprintf(line, sizeof(line), "bluetoothd-why: %s(%d) from %p; slide %p, its file %s, %u images\n", which, status, from,
++	    (void *)slide, _dyld_get_image_name(0), _dyld_image_count());
++	say(line);
++	for (int i = 0; i < count; i++) {
++		if (dladdr(frames[i], &where) != 0 && where.dli_fname != NULL) {
++			snprintf(line, sizeof(line), "bluetoothd-why: #%d %s + %#llx in %s (image at %p)\n", i,
++			    where.dli_sname != NULL ? where.dli_sname : "?", (unsigned long long)((intptr_t)frames[i] -
++			    (intptr_t)(where.dli_saddr != NULL ? where.dli_saddr : 0)), where.dli_fname,
++			    (void *)where.dli_fbase);
++			say(line);
++		} else {
++			snprintf(line, sizeof(line), "bluetoothd-why: #%d at %p (no image says)\n", i, frames[i]);
++			say(line);
++		}
++	}
++	/* (t8: t7 named /usr/sbin/bluetoothd as the caller's image, yet no _exit call site of the file this tree was
++	 * built from is at that offset -- it may be another build. The bytes of the call say which: searched for in
++	 * the file, they give the place, and where the file has them not, it is not this build.) */
++	say_hex_around("bluetoothd-why: code", from, 32, 96);
++	say_bt_logs("at exit");
++}
++
++/* (not _exit again: the system call it is, Darwin's SYS_exit = 1) */
++static void __attribute__((noreturn))
++really_exit(int status)
++{
++	(void)syscall(1, status);
++	for (;;) {
++		__builtin_trap();
++	}
++}
++
++static void __attribute__((noreturn))
++hakios_exit(int status)
++{
++	if (getprogname() != NULL && strcmp(getprogname(), "bluetoothd") == 0) {
++		bluetoothd_dying(status, __builtin_return_address(0), "exit");
++	}
++	really_exit(status);
++}
++
++static void __attribute__((noreturn))
++hakios__exit(int status)
++{
++	if (getprogname() != NULL && strcmp(getprogname(), "bluetoothd") == 0) {
++		bluetoothd_dying(status, __builtin_return_address(0), "_exit");
++	}
++	really_exit(status);
++}
++
++void exit(int) __attribute__((noreturn));
++void _exit(int) __attribute__((noreturn));
++
++#define DYLD_INTERPOSE(_replacement, _replacee) \
++	__attribute__((used)) static struct { const void *replacement, *replacee; } \
++	_interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = { \
++		(const void *)&_replacement, (const void *)&_replacee }
++
++DYLD_INTERPOSE(hakios_exit, exit);
++DYLD_INTERPOSE(hakios__exit, _exit);
++
++/*
++ * ---- what bluetoothd says to the log it keeps out of the console ----
++ * Its os_log lines do not reach the kernel's console (t6's run has none of them, while wifid's warnings are there:
++ * the console filter drops its levels). The one that says why it goes on to exit is among them -- the branch at
++ * 0x1003a5f54 builds "Init failed, still in high power result=%d", "timed out booting the chip, restarting" and
++ * "Unknown platform/chipset/manufacturer combination, restarting". Every os_log call arrives at _os_log_impl;
++ * interposed, the call's own format string is said on the console before the original writes it. bluetoothd's only,
++ * the first 300, and only the longer ones (the short debug lines would push everything else out of the ring).
++ */
++extern void _os_log_impl(void *dso, const char *msg, unsigned char type, const unsigned char *buf, unsigned size);
++extern void _os_log_error_impl(void *dso, const char *msg, unsigned char type, const unsigned char *buf, unsigned size);
++extern void _os_log_fault_impl(void *dso, const char *msg, unsigned char type, const unsigned char *buf, unsigned size);
++extern void _os_log_debug_impl(void *dso, const char *msg, unsigned char type, const unsigned char *buf, unsigned size);
++
++typedef void (*os_log_impl_t)(void *, const char *, unsigned char, const unsigned char *, unsigned);
++
++static os_log_impl_t real_os_log_impl, real_os_log_error_impl, real_os_log_fault_impl, real_os_log_debug_impl;
++static unsigned os_log_said;
++static int os_log_inside;
++
++static void
++say_os_log(const char *which, const char *msg, unsigned char type)
++{
++	char line[320];
++
++	if (os_log_inside || msg == NULL || os_log_said >= 300 || strlen(msg) < 8) {
++		return;
++	}
++	if (getprogname() == NULL || strcmp(getprogname(), "bluetoothd") != 0) {
++		return;
++	}
++	os_log_said++;
++	snprintf(line, sizeof(line), "bluetoothd-say[%u/%s]: %s\n", (unsigned)type, which, msg);
++	say(line);
++}
++
++static os_log_impl_t
++keep_real(os_log_impl_t *slot, const char *name)
++{
++	if (*slot == NULL) {
++		os_log_inside = 1;
++		*slot = (os_log_impl_t)dlsym(RTLD_NEXT, name);
++		os_log_inside = 0;
++	}
++	return *slot;
++}
++
++static void
++hakios_os_log_impl(void *dso, const char *msg, unsigned char type, const unsigned char *buf, unsigned size)
++{
++	os_log_impl_t real;
++
++	say_os_log("log", msg, type);
++	real = keep_real(&real_os_log_impl, "_os_log_impl");
++	if (real != NULL && (void *)real != (void *)hakios_os_log_impl) {
++		real(dso, msg, type, buf, size);
++	}
++}
++
++static void
++hakios_os_log_error_impl(void *dso, const char *msg, unsigned char type, const unsigned char *buf, unsigned size)
++{
++	os_log_impl_t real;
++
++	say_os_log("error", msg, type);
++	real = keep_real(&real_os_log_error_impl, "_os_log_error_impl");
++	if (real != NULL && (void *)real != (void *)hakios_os_log_error_impl) {
++		real(dso, msg, type, buf, size);
++	}
++}
++
++static void
++hakios_os_log_fault_impl(void *dso, const char *msg, unsigned char type, const unsigned char *buf, unsigned size)
++{
++	os_log_impl_t real;
++
++	say_os_log("fault", msg, type);
++	real = keep_real(&real_os_log_fault_impl, "_os_log_fault_impl");
++	if (real != NULL && (void *)real != (void *)hakios_os_log_fault_impl) {
++		real(dso, msg, type, buf, size);
++	}
++}
++
++static void
++hakios_os_log_debug_impl(void *dso, const char *msg, unsigned char type, const unsigned char *buf, unsigned size)
++{
++	os_log_impl_t real;
++
++	say_os_log("debug", msg, type);
++	real = keep_real(&real_os_log_debug_impl, "_os_log_debug_impl");
++	if (real != NULL && (void *)real != (void *)hakios_os_log_debug_impl) {
++		real(dso, msg, type, buf, size);
++	}
++}
++
++/* (the originals before anything of the daemon's can log: a lazy dlsym inside a log call could log itself) */
++__attribute__((constructor))
++static void
++keep_os_log(void)
++{
++	keep_real(&real_os_log_impl, "_os_log_impl");
++	keep_real(&real_os_log_error_impl, "_os_log_error_impl");
++	keep_real(&real_os_log_fault_impl, "_os_log_fault_impl");
++	keep_real(&real_os_log_debug_impl, "_os_log_debug_impl");
++}
++
++DYLD_INTERPOSE(hakios_os_log_impl, _os_log_impl);
++DYLD_INTERPOSE(hakios_os_log_error_impl, _os_log_error_impl);
++DYLD_INTERPOSE(hakios_os_log_fault_impl, _os_log_fault_impl);
++DYLD_INTERPOSE(hakios_os_log_debug_impl, _os_log_debug_impl);
++
++/*
++ * ---- the reason, which a release build does not say ----
++ * The fatal path is one wrapper at 0x100901f4 (t7's exits came from it: address - 0x90238 was 0x100e8c000, a page
++ * boundary). It asks os_variant_has_internal_diagnostics("com.apple.bluetooth") and, on a release build, skips the
++ * part that writes the reason into /private/var/mobile/Library/Logs/Bluetooth/bluetoothd-FWCOREDUMP_%s.log and
++ * goes straight to the one-second sleep and _exit(1). Saying yes here makes it write that file, which say_bt_logs
++ * reads, and the console shows the call's subsystem.
++ */
++extern int os_variant_has_internal_diagnostics(const char *subsystem);
++
++static int (*real_internal_diagnostics)(const char *);
++static int internal_inside;
++
++static int
++hakios_internal_diagnostics(const char *subsystem)
++{
++	const char *name = getprogname();
++
++	if (!internal_inside && name != NULL && strcmp(name, "bluetoothd") == 0) {
++		char line[200];
++
++		snprintf(line, sizeof(line), "bluetoothd-say: internal diagnostics for \"%s\": yes\n",
++		    subsystem != NULL ? subsystem : "(none)");
++		say(line);
++		return 1;
++	}
++	if (real_internal_diagnostics == NULL) {
++		internal_inside = 1;
++		real_internal_diagnostics = dlsym(RTLD_NEXT, "os_variant_has_internal_diagnostics");
++		internal_inside = 0;
++	}
++	return real_internal_diagnostics != NULL ? real_internal_diagnostics(subsystem) : 0;
++}
++
++/* (t9 made bluetoothd take its internal path: the exit turned into a loop of 1402 "internal diagnostics" asks
++ * and no reason anyhow, so the daemon is left as it was -- the interposition stays here, unused, for a run that
++ * wants the internal crash log) */
++/* DYLD_INTERPOSE(hakios_internal_diagnostics, os_variant_has_internal_diagnostics); */
++
++/*
++ * ---- the one place that says why ----
++ * Every exit of t6-t11 came through the same call: code at 0xf351c of /usr/sbin/bluetoothd called the fatal
++ * wrapper at 0x901f4 with (a status, "HCI initialization failed"), and the wrapper sleeps a second and calls
++ * _exit(1). The status is never said anywhere -- not on the console, not in the Bluetooth logs. The page is
++ * read-only (mprotect says EACCES, t11), so the call cannot be redirected; but the wrapper keeps the two in x20
++ * and x19 and calls usleep(1000000) just before _exit -- so usleep is where they are read, with the arm64
++ * callee-saved registers still holding the wrapper's arguments.
++ */
++static uintptr_t bluetoothd_base;
++
++static void
++find_bluetoothd_base(void)
++{
++	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
++		const char *name = _dyld_get_image_name(i);
++
++		if (name != NULL && strcmp(name, "/usr/sbin/bluetoothd") == 0) {
++			bluetoothd_base = (uintptr_t)_dyld_get_image_header(i);
++			break;
++		}
++	}
++}
++
++static int (*real_usleep_fn)(unsigned);
++
++/* (the arguments are read before this function's own prologue can touch x19: a naked shim hands them over) */
++void
++hakios_usleep_note(unsigned usec, long status, const char *message, uintptr_t from)
++{
++	char line[320];
++	struct timespec ts;
++
++	if (bluetoothd_base != 0 && from >= bluetoothd_base + 0x901f4 && from < bluetoothd_base + 0x90238) {
++		snprintf(line, sizeof(line), "bluetoothd-why: fatal: status %ld (%#lx), \"%s\"\n", status,
++		    (unsigned long)status, message != NULL ? message : "(none)");
++		say(line);
++	}
++	/* (not dlsym(RTLD_NEXT, "usleep"): in this dyld that returned the interposed function itself and the
++	 * system's first usleep call spun for ever -- t12-t14, the daemon alive and doing nothing. usleep is
++	 * nanosleep with microseconds; that is done here directly.) */
++	ts.tv_sec = (time_t)(usec / 1000000u);
++	ts.tv_nsec = (long)(usec % 1000000u) * 1000L;
++	(void)nanosleep(&ts, NULL);
++}
++
++__attribute__((naked))
++static void
++hakios_usleep(void)
++{
++	__asm__ volatile(
++		"stp x29, x30, [sp, #-48]!\n\t"
++		"mov x29, sp\n\t"
++		"str x0, [sp, #16]\n\t"
++		"mov x1, x20\n\t"                  /* the fatal wrapper's status */
++		"mov x2, x19\n\t"                  /* its message */
++		"mov x3, x30\n\t"                  /* where it was called from */
++		"bl _hakios_usleep_note\n\t"
++		"ldp x29, x30, [sp], #48\n\t"
++		"mov w0, #0\n\t"                   /* usleep's own answer */
++		"ret\n\t");
++}
++
++__attribute__((constructor))
++static void
++hook_the_fatal(void)
++{
++	if (getprogname() != NULL && strcmp(getprogname(), "bluetoothd") == 0) {
++		find_bluetoothd_base();
++	}
++}
++
++DYLD_INTERPOSE(hakios_usleep, usleep);

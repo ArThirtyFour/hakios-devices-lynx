@@ -23,11 +23,11 @@ it from the computer over USB at every boot.
 | buttons | works | power and volume down, plain GPIOs polled with the touch screen. Volume up is in the driver the same way but **untested**: that button is physically broken on the phone this was done with |
 | CPU | partial | 7 of 8 cores: 2 X1 at 2048 MHz, 2 A78 at 1663 MHz, 3 A55 at 1197 MHz, set once through ACPM DVFS. The eighth core is the loader's. **No thermal control** |
 | battery | works | MAX77759 fuel gauge and charger read over I2C, bit-banged on the bus's pads (`drivers/power/hakios.lynx_battery.c`, `lynx_battery=1`): charge, voltage, current, temperature, charger state |
-| GPU / Metal | missing | no Mali-G710 driver. Wallpapers and blurred parts of the interface are not drawn as they should be |
-| Bluetooth | missing | step one only: the loader loads the chip's firmware (WCN6740, UART), the kernel reads its version and scans the air for eight seconds (`drivers/bluetooth/hakios.lynx_bt.c`, `lynx_bt=1`). This step has been built but **not yet run on the phone**; the same sequence ran as a probe (`probes/btfw.c`). Nothing Darwin can use |
+| GPU / Metal | partial | the Mali-G710 driver and its IOKit service are in `drivers/gpu/` (kept out of this repository, see there): the GPU comes up step by step (`mali=N`), its MCU runs Arm's CSF firmware (the phone's own `mali_csffw-r54p3.bin`) and answers a ping; the command stream, the shaders and `hakios-metal`'s back end were moved from the Pixel 8a's GPU architecture (G715, arch 11) to this one (G710, arch 10): scordboard, wait masks, GPU_ID. Not yet a working Metal device in iOS: the precompiled blit shaders and a few drawing registers still have to be brought over. |
+| Bluetooth | partial | the loader loads the chip's firmware (WCN6740, UART), the kernel proves it (HCI 12.0000, its own address, LE scan finds devices) and gives it to iOS: the kernel control, the Skywalk pipe and the nodes `/dev/btwake|btreset|btpoweroff` (`drivers/bluetooth/hakios.lynx_bt.c`, the chip-independent half in the main tree). iOS's `bluetoothd` attaches and its logs are answered by an inserted library; it still will not power the controller (the toggle springs back), which is what is being chased. |
 | Wi-Fi | missing | probes only (`probes/pcieprobe.c`): the PCIe link comes up, the chip (17cb:1103) and its MHI registers are read; the firmware download through BHI does not complete, reason unknown |
 | storage | missing | none of the phone's: the system image is in RAM |
-| audio, cellular, camera, sensors | missing | not started |
+| audio, cellular, camera, sensors | missing | audio started: `drivers/aoc/` (gs201's AoC: `aoc_req` 0x181d0000, S2MPU 0x1a0b0000, SysMMU 0x1a090000, GSA 0x17c90000) and `drivers/audio/` (the two CS35L41 on PERIC0 USI7). The AoC needs its firmware (`/vendor/firmware/aoc.bin`, not pulled yet) and a Trusty client to cold-start it; the amplifiers need their SPI clock confirmed. Cellular, camera and sensors: not started. |
 
 What was seen on the phone and what was only built is said in each row; `device.conf` has the same in the
 form HakiOS reads.
@@ -145,6 +145,8 @@ Android back about 100 seconds later. Each one switches off what it switched on.
 | `btprobe` | does the Bluetooth half answer on its UART |
 | `btfw` | does it take its firmware and run it |
 | `pcieprobe` | does PCIe RC 1 link up, is the Wi-Fi chip there, does it take the first part of its firmware (it does not) |
+| `gpuprobe` | is the Mali-G710 powered and does it obey: identity, a soft reset, the L2 cache on and off |
+| `gpumcu` | does the GPU's own processor boot Arm's CSF firmware (needs `mali_csffw-r54p3.bin` in `fw-lynx/`) and answer a ping |
 
 ## Licences
 

@@ -388,9 +388,7 @@ touching(void)
 }
 
 /* The kernel's own log (loader_return.c) is only handed over when the kernel returns to the loader; the lines about
- * starting the other processors are copied to the ramoops console as they appear, in the log's first 256 KB. */
-extern char loader_log[];
-extern uint32_t loader_log_len;
+ * starting the other processors, the GPU and Bluetooth are copied to the ramoops console as they appear. */
 extern unsigned int processor_avail_count, real_ncpus;
 
 static void
@@ -408,28 +406,53 @@ oops_raw(const char *text, uint32_t n)
 	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
+/* the log from character *cursor on, wherever it is by now (its first 256 KB stay, the rest is a ring) */
+extern size_t loader_log_copy(uint64_t *cursor, char *out, size_t max);
+
+static bool
+kernel_log_wanted(const char *line, uint32_t n)
+{
+	if (n <= 6 || n >= 400) {
+		return false;
+	}
+	if (strnstr(line, "psci", n) || strnstr(line, "GenericARMCPU", n) || strnstr(line, "panic", n) ||
+	    strnstr(line, "secondary", n) || strnstr(line, "mali", n) || strnstr(line, "HakiosGPU", n) ||
+	    strnstr(line, "HakiosMetal", n) || strnstr(line, "BTLOG", n)) {
+		return true;
+	}
+	if (strnstr(line, "luetooth", n) || strnstr(line, "BlueTool", n)) {
+		/* launchd says a dozen lines for every start of a job: of those only how one ended */
+		return !strnstr(line, "com.apple.xpc.launchd", n) || strnstr(line, "exit", n) || strnstr(line, "signal", n) ||
+		       strnstr(line, "reason", n) || strnstr(line, "crash", n) || strnstr(line, "abnormal", n);
+	}
+	return false;
+}
+
 static void
 kernel_log_scan(void)
 {
-	static uint32_t scanned;
-	uint32_t end = loader_log_len < 256 * 1024 ? loader_log_len : 256 * 1024;
+	static uint64_t cursor;
+	static char chunk[4096], line[400];
+	static uint32_t have;           /* of a line that has not ended yet */
+	static bool too_long;
+	size_t got;
 
-	while (scanned < end) {
-		uint32_t line = scanned, n = 0;
-
-		while (line + n < end && loader_log[line + n] != '\n') {
-			n++;
+	while ((got = loader_log_copy(&cursor, chunk, sizeof(chunk))) != 0) {
+		for (size_t i = 0; i < got; i++) {
+			if (have < sizeof(line) - 1) {
+				line[have++] = chunk[i];
+			} else {
+				too_long = true;
+			}
+			if (chunk[i] == '\n') {
+				if (!too_long && kernel_log_wanted(line, have)) {
+					oops_raw("K: ", 3);
+					oops_raw(line, have);
+				}
+				have = 0;
+				too_long = false;
+			}
 		}
-		if (line + n >= end) {
-			return;         /* not a whole line yet */
-		}
-		n++;
-		if (n > 6 && n < 400 && (strnstr(loader_log + line, "psci", n) || strnstr(loader_log + line, "GenericARMCPU", n) ||
-		    strnstr(loader_log + line, "panic", n) || strnstr(loader_log + line, "secondary", n))) {
-			oops_raw("K: ", 3);
-			oops_raw(loader_log + line, n);
-		}
-		scanned = line + n;
 	}
 }
 

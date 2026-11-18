@@ -1,0 +1,15 @@
+# devices/lynx/drivers/aoc/conf: the Pixel 7a's AoC (docs/drivers-config.md, docs/porting/drivers.md).
+#
+# The AoC ("always-on compute") is Google's audio and sensor DSP on gs201: every on-device audio path ends there --
+# the two CS35L41 speaker amplifiers' TDM link, the three PDM microphones, the earpiece and Bluetooth SCO -- and the
+# sensor hub (accelerometer, light, proximity, ...) is behind it too. This driver cold-starts it and feeds its
+# audio_playbackN rings for the speakers (drivers/audio/hakios.lynx_amp.c is the amplifiers' control side).
+
+driver LYNX_AOC
+	file    bsd/dev/hakios.lynx_aoc.c
+	requires GUARD
+	help    the Pixel 7a's AoC (audio, sensors): started cold through the GSA's mailbox (gsa-ns 0x17c90000: load, cmd 90)
+	help    and Trusty's hwmgr.aoc service (start; drivers/aoc has none yet -- lynx_trusty_aoc_cmd is a weak stub), its
+	help    SysMMU (0x1a090000) windows and both S2MPUs (0x1a0b0000, 0x17c60000) opened first; aoc=1 reads the state and the
+	help    GSA's chip id, aoc=2 looks for a running control block, aoc=3 does the full load, and aocsound=1 plays Darwin's
+	help    sound through it (aocplay=N a tone first)

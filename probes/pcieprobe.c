@@ -160,6 +160,9 @@ static void s2mpu_show(const char *when)
     if (tryrd(" sysmmu CTRL", SYSMMU + 0x0)) {
         tryrd(" sysmmu CFG", SYSMMU + 0x4); tryrd(" sysmmu STATUS", SYSMMU + 0x8); tryrd(" sysmmu VERSION", SYSMMU + 0x34);
         tryrd(" sysmmu CTRL_VID(1)", SYSMMU + 0x8000 + 0x1000);
+        tryrd(" sysmmu CTRL_VID(0)", SYSMMU + 0x8000);
+        /* (v6 read INT_STATUS 0x60 and the FAULT_* registers 0x70-0x88 here: this block does not answer there, it
+         * returns an external abort -- and the attempt below was then dropped over it. Left out.) */
     }
     log_flush();
 }
@@ -215,6 +218,48 @@ static void pbl_show(uint64_t bar, const char *when)
     log_hex(" WLAN_JTAG_ID", winrd(bar, 0x1E22B3C)); log_hex(" QFPROM_RAW_OEM_SECURE_ROW0_LSB", winrd(bar, 0x1E20010));
     log_hex(" TLMM_OD_EN", winrd(bar, 0x1910020)); log_hex(" PCIE_PARF_LTSSM", winrd(bar, 0x01E081B0));
     for (uint32_t i = 0; i < 40; i += 4) log_hex(" PBL log word", winrd(bar, 0x01403DA0 + i));
+    log_flush();
+}
+
+/*
+ * v6: what PCI Express itself says went wrong, of one function (the root port through DBI, the chip through CFG): its
+ * status, the PCIe capability's Device Status, and Advanced Error Reporting -- the uncorrectable and correctable
+ * status and the header of the first packet in error, which names the request (its address, who sent it).
+ * Layout: PCI Express Base Specification 7.5.1 (status at 0x06, capability list at 0x34), 7.5.3 (PCI Express
+ * capability, id 0x10: Device Status at +0x0a, Link Status at +0x12), 7.8.4 (AER, extended capability id 1 from
+ * 0x100: uncorrectable status +0x04, correctable status +0x10, header log +0x1c, root error status +0x30).
+ */
+static void pci_errors(const char *who, uint64_t cfg)
+{
+    uint32_t at = rd(cfg + 0x34) & 0xfc, ext = 0x100;
+
+    log_str(who); log_str("\n");
+    log_hex(" status/command", rd(cfg + 0x04));
+    for (int i = 0; i < 16 && at >= 0x40; i++) {
+        uint32_t h = rd(cfg + at);
+
+        if ((h & 0xff) == 0x10) {
+            log_hex(" pcie cap at", at); log_hex("  device status/control", rd(cfg + at + 0x08));
+            log_hex("  link status/control", rd(cfg + at + 0x10));
+            wr(cfg + at + 0x08, rd(cfg + at + 0x08));               /* the status bits are write-one-to-clear */
+        }
+        at = (h >> 8) & 0xfc;
+    }
+    for (int i = 0; i < 24 && ext >= 0x100 && ext < 0x1000; i++) {
+        uint32_t h = rd(cfg + ext);
+
+        if (h == 0 || h == 0xffffffffu) break;
+        if ((h & 0xffff) == 0x0001) {
+            log_hex(" aer at", ext); log_hex("  uncorrectable status", rd(cfg + ext + 0x04));
+            log_hex("  uncorrectable mask", rd(cfg + ext + 0x08)); log_hex("  correctable status", rd(cfg + ext + 0x10));
+            log_hex("  capabilities/first error", rd(cfg + ext + 0x18));
+            log_hex("  header log 0", rd(cfg + ext + 0x1c)); log_hex("  header log 1", rd(cfg + ext + 0x20));
+            log_hex("  header log 2", rd(cfg + ext + 0x24)); log_hex("  header log 3", rd(cfg + ext + 0x28));
+            log_hex("  root error status", rd(cfg + ext + 0x30)); log_hex("  error source", rd(cfg + ext + 0x34));
+            wr(cfg + ext + 0x04, rd(cfg + ext + 0x04)); wr(cfg + ext + 0x10, rd(cfg + ext + 0x10));
+        }
+        ext = h >> 20;
+    }
     log_flush();
 }
 
@@ -473,7 +518,6 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                     rmw(CMU + 0x3090, 1u, 2u); rmw(CMU + 0x3094, 1u, 2u); rmw(CMU + 0x3084, 1u, 2u);
                     wait_us(200);
                     s2mpu_show("DMA gate as ABL left it");
-                    if (faults) { stage("the DMA gate cannot be read: no download"); goto nobhi; }
                     /* v5: this S2MPU is v8 and CTRL0 = 0: not enabled, and "otherwise all traffic would be allowed through"
                      * (s2mpu.c:145): left alone. Only when it is enabled is it opened. */
                     if ((rd(S2MPU + 0x0) & 1u) && !s2mpu_open()) { stage("the S2MPU is on and was not opened: no download"); goto nobhi; }
@@ -482,32 +526,55 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                     wr(SYSMMU + 0x8000 + 0x1000, 0); wr(SYSMMU + 0x4, 0); wr(SYSMMU + 0x0, 0);
                     s2mpu_show("DMA gate before the download");
                     pbl_show(bar, "first loader before the download");
-                    log_hex("BHI image at", img); log_hex(" size", size); log_hex(" its first word", rd(img)); log_flush();
-                    wr(bar + bhi + 0x20, 0);                    /* BHI_INTVEC: nobody listens */
-                    wr(bar + bhi + 0x2c, 0);                    /* BHI_STATUS */
-                    wr(bar + bhi + 0x0c, (uint32_t)(img >> 32));
-                    wr(bar + bhi + 0x08, (uint32_t)img);
-                    wr(bar + bhi + 0x10, size);
-                    wr(bar + bhi + 0x18, 0x1234567u);           /* BHI_IMGTXDB: a session id, any non-zero 30 bits */
-                    stage("BHI doorbell rung");
-                    t0 = touch_ticks();
-                    while (touch_ticks() - t0 < 5 * counter_freq()) {
-                        st = rd(bar + bhi + 0x2c); ee = rd(bar + bhi + 0x28);
-                        if (st != lastst || ee != lastee) {
-                            log_hex("ms", (touch_ticks() - t0) * 1000u / counter_freq());
-                            log_hex(" BHI_STATUS", st); log_hex(" BHI_EXECENV", ee); log_flush();
-                            lastst = st; lastee = ee;
+                    pci_errors("errors before the download: root port", DBI);
+                    pci_errors("errors before the download: wifi", CFG);
+                    /* v6: twice. Every run so far gave the chip an address below 4 GB (this program is loaded at
+                     * 0x80000000) and it never read it. First a copy above 4 GB (bank 3 of the memory, free here),
+                     * where Android's buffers may well have been; then, if that fails too, the address as before.
+                     * After each: what PCI Express recorded, on both ends. */
+                    for (int attempt = 0; attempt < 2 && ee != 1; attempt++) {
+                        if (attempt == 0) {
+                            volatile uint64_t *to = (volatile uint64_t *)0x8c0000000ull;
+                            const uint64_t *from = (const uint64_t *)(uintptr_t)wifi_sbl;
+
+                            for (uint32_t i = 0; i < (size + 7) / 8; i++) to[i] = from[i];
+                            __asm__ volatile("dsb sy" ::: "memory");
+                            img = 0x8c0000000ull;
+                        } else {
+                            img = (uint64_t)(uintptr_t)wifi_sbl;
                         }
-                        if ((st >> 30) == 3 || ee == 1 || faults) break;
-                        wait_us(200);
+                        lastst = lastee = 0xffffffffu;
+                        log_hex("BHI attempt", (uint64_t)attempt);
+                        log_hex(" image at", img); log_hex(" size", size); log_hex(" its first word", rd(img)); log_flush();
+                        wr(bar + bhi + 0x20, 0);                    /* BHI_INTVEC: nobody listens */
+                        wr(bar + bhi + 0x2c, 0);                    /* BHI_STATUS */
+                        wr(bar + bhi + 0x0c, (uint32_t)(img >> 32));
+                        wr(bar + bhi + 0x08, (uint32_t)img);
+                        wr(bar + bhi + 0x10, size);
+                        wr(bar + bhi + 0x18, 0x1234567u + (uint32_t)attempt);  /* BHI_IMGTXDB: a session id, any non-zero 30 bits */
+                        stage("BHI doorbell rung");
+                        t0 = touch_ticks();
+                        while (touch_ticks() - t0 < 4 * counter_freq()) {
+                            st = rd(bar + bhi + 0x2c); ee = rd(bar + bhi + 0x28);
+                            if (st != lastst || ee != lastee) {
+                                log_hex("ms", (touch_ticks() - t0) * 1000u / counter_freq());
+                                log_hex(" BHI_STATUS", st); log_hex(" BHI_EXECENV", ee); log_flush();
+                                lastst = st; lastee = ee;
+                            }
+                            if ((st >> 30) == 3 || ee == 1) break;
+                            wait_us(200);
+                        }
+                        reg("BHI_ERRCODE", bar + bhi + 0x30); reg("BHI_ERRDBG1", bar + bhi + 0x34);
+                        reg("BHI_ERRDBG2", bar + bhi + 0x38); reg("BHI_ERRDBG3", bar + bhi + 0x3c);
+                        reg("BHI_IMGADDR_LOW back", bar + bhi + 0x08); reg("BHI_IMGADDR_HIGH back", bar + bhi + 0x0c);
+                        reg("BHI_IMGSIZE back", bar + bhi + 0x10); reg("BHI_IMGTXDB back", bar + bhi + 0x18);
+                        reg("MHISTATUS", bar + 0x48); reg("MHICTRL", bar + 0x38); reg("MHIVER", bar + 0x08); log_flush();
+                        pci_errors("errors after the download: root port", DBI);
+                        pci_errors("errors after the download: wifi", CFG);
+                        if (ee == 1) stage("WIFI FIRST LOADER (SBL) RUNNING: the chip read our memory");
+                        else if ((st >> 30) == 2) stage("image taken, but no SBL yet");
+                        else stage("BHI DOWNLOAD DID NOT COMPLETE");
                     }
-                    reg("BHI_ERRCODE", bar + bhi + 0x30); reg("BHI_ERRDBG1", bar + bhi + 0x34);
-                    reg("BHI_ERRDBG2", bar + bhi + 0x38); reg("BHI_ERRDBG3", bar + bhi + 0x3c);
-                    reg("MHISTATUS", bar + 0x48); reg("MHICTRL", bar + 0x38); reg("MHIVER", bar + 0x08);
-                    reg("rc status/command", DBI + 0x04); reg("wifi status/command", CFG + 0x04); log_flush();
-                    if (ee == 1) stage("WIFI FIRST LOADER (SBL) RUNNING: the chip read our memory");
-                    else if ((st >> 30) == 2) stage("image taken, but no SBL yet");
-                    else stage("BHI DOWNLOAD DID NOT COMPLETE");
                     s2mpu_show("DMA gate after the download");
                     pbl_show(bar, "first loader after the download");
                 nobhi: ;
