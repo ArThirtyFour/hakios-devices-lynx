@@ -208,6 +208,14 @@ static uint32_t winrd(uint64_t bar, uint32_t offset)
     return rd(bar + 0x80000 + (offset & 0x7ffffu));
 }
 
+/* (v8: the same window, for a write) */
+static void winwr(uint64_t bar, uint32_t offset, uint32_t value)
+{
+    wr(bar + 0x310C, 0x40000000u | ((offset >> 19) & 0x3fu));
+    (void)rd(bar + 0x310C);
+    wr(bar + 0x80000 + (offset & 0x7ffffu), value);
+}
+
 /* cnss_pci_dump_bl_sram_mem(), ref/cnss2/pci.c:1360-1436, for the QCA6490: what the chip's first loader says of itself */
 static void pbl_show(uint64_t bar, const char *when)
 {
@@ -498,6 +506,16 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                 uint32_t bhi = rd(bar + 0x28), bhie = rd(bar + 0x2c);
 
                 if (bhi && bhi < 0x100000 && !(bhi & 3)) {
+                    /* v14: what the statuses and the segment count are BEFORE any doorbell. v13's
+                     * TXVECSTATUS "complete" may have been the bootloader's leftover; without this line
+                     * there is no way to tell a real answer from one. */
+                    log_str("BHI/BHIe before any doorbell\n");
+                    reg(" BHI_STATUS pre", bar + bhi + 0x2c); reg(" BHI_EXECENV pre", bar + bhi + 0x28);
+                    reg(" BHI_NUMSEG pre", bar + bhi + 0x48); reg(" BHI_ERRCODE pre", bar + bhi + 0x30);
+                    if (bhie && bhie < 0x100000 && !(bhie & 3)) {
+                        reg(" TXVECSTATUS pre", bar + bhie + 0x44); reg(" TXVECSIZE pre", bar + bhie + 0x34);
+                    }
+                    log_flush();
                     tryrd("BHI version minor", bar + bhi + 0x00); tryrd("BHI version major", bar + bhi + 0x04);
                     tryrd("BHI_EXECENV (0 PBL, 1 SBL, 2 AMSS)", bar + bhi + 0x28); tryrd("BHI_STATUS", bar + bhi + 0x2c);
                     tryrd("BHI_ERRCODE", bar + bhi + 0x30); tryrd("BHI_SERIALNU", bar + bhi + 0x40);
@@ -509,6 +527,59 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                 if (bhi && bhi < 0x100000 && !(bhi & 3) && rd(bar + bhi + 0x28) == 0) {
                     uint64_t img = (uint64_t)(uintptr_t)wifi_sbl, t0;
                     uint32_t size = (uint32_t)(wifi_sbl_end - wifi_sbl), st = 0, ee = 0, lastst = 0xffffffffu, lastee = 0xffffffffu;
+                    const uint8_t *fw = wifi_sbl;
+
+                    /* v9: the whole of the phone's amss20.bin, not the first 512 KB. Its first loader's part is
+                     * 5.1 MB (17 PT_LOAD segments, the SBL ones end at 0x4fd000), and cnss2's sbl_size may well
+                     * be that rather than SZ_512K: v8's chip took the doorbell, wrote "loading the SBL" into its
+                     * PBL log and read nothing, which is what too short an image looks like. It does not fit in
+                     * the loader's slot (0x10000-0x200000), so it travels in the image's payload, where mkimg puts
+                     * a ramdisk (LYNXPAY2: 8 bytes of magic, six 32-bit lengths and crcs, then the gspe padded to
+                     * 16, then the ramdisk). Nothing but this program reads a payload of a probe image. */
+                    {
+                        const uint8_t *p = (const uint8_t *)(uintptr_t)0x80200000ull;   /* the image is loaded at 0x80000000 and mkimg writes the payload at +0x200000 */
+                        int magic = 1;
+
+                        for (unsigned i = 0; i < 8; i++) {
+                            magic = magic && p[i] == (uint8_t)"LYNXPAY2"[i];
+                        }
+                        if (magic) {
+                            uint32_t glen = *(const uint32_t *)(const void *)(p + 8);
+                            uint32_t rlen = *(const uint32_t *)(const void *)(p + 16);
+                            const uint8_t *gspe = p + 32;
+                            const uint8_t *rd = gspe + ((glen + 15u) & ~15u);
+
+                            if (glen > 0x1000 && glen < 0x2000000 && gspe[0] == 0x7f) {
+                                fw = gspe;
+                                size = glen;
+                                stage("the firmware is the image's payload (gspe part)");
+                            } else if (rlen > 0x1000 && rlen < 0x2000000 && rd[0] == 0x7f) {
+                                fw = rd;
+                                size = rlen;
+                                stage("the firmware is the image's payload (ramdisk part)");
+                            }
+                        }
+                        /* v15: every buffer of Android's own download lives in the reserved wifi_region
+                         * (0xfa800000-0xfcffffff, the FDT's reserved-memory node "wifi_region"), and the driver
+                         * registers each 4 KiB of it with the S2MPU and maps it 1:1 in the PCIe SysMMU
+                         * (pcie_dma_alloc_attrs). Our payload at 0x81100020 is not registered anywhere, which is
+                         * a good reason for a chip whose doorbell is taken to read nothing. The image is copied
+                         * into that region and loaded from there. */
+                        {
+                            volatile uint64_t *dst = (volatile uint64_t *)(uintptr_t)0xfa800000ull;
+                            const uint64_t *src = (const uint64_t *)(const void *)fw;
+                            uint32_t words = (size + 7u) / 8u;
+
+                            for (uint32_t i = 0; i < words; i++) {
+                                dst[i] = src[i];
+                            }
+                            __asm__ volatile("dsb sy" ::: "memory");
+                            fw = (const uint8_t *)(uintptr_t)0xfa800000ull;
+                            stage("the firmware is copied into the reserved wifi_region at 0xfa800000");
+                        }
+                        log_hex(" firmware at", (uint64_t)(uintptr_t)fw); log_hex(" size", size);
+                        log_hex(" first word", rd((uint64_t)(uintptr_t)fw)); log_flush();
+                    }
 
                     /* the S2MPU's and the SysMMU's own clocks (sfr:1943-1987, 3539-3543), then the gate itself */
                     reg("gate s2mpu 0x20c0", CMU + 0x20c0); reg("gate sysmmu s1 0x2028", CMU + 0x2028);
@@ -532,20 +603,115 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                      * 0x80000000) and it never read it. First a copy above 4 GB (bank 3 of the memory, free here),
                      * where Android's buffers may well have been; then, if that fails too, the address as before.
                      * After each: what PCI Express recorded, on both ends. */
+                    /* v8: the WLAN domain's own power control. cnss2 clears SHUTDOWN_EN (bit 0) and
+                     * VDD4BLOW_SW_EN (bit 2) in WLAON_QFPROM_PWR_CTRL_REG through the same remap window before
+                     * it starts MHI (ref/cnss2/pci.c:1843-1895 and its call at 2566). v7: the chip latched the
+                     * doorbell (BHI_ERRDBG1/2/3 held our address and size), never read, and PCI Express had
+                     * nothing to report -- a domain still in shutdown looks exactly like that. */
+                    /* v11: the inbound ATU. A TLP from the chip to our memory passes this window; if it is
+                     * enabled and does not match, the root complex drops it and nothing anywhere says so --
+                     * which is exactly what v7-v10 look like (doorbell taken, no read, AER clean). DWC puts
+                     * region n of the inbound direction at ATU + (n << 9) | BIT(8) (pcie-designware.h:121-125,
+                     * iatu_unroll). What the bootloader left is read, and an identity window (all of memory,
+                     * match mode off) is written over it. */
+                    {
+                        static const uint32_t in0 = ATU0 + 0x100;
+
+                        log_str("inbound ATU as left by the bootloader\n");
+                        reg(" in0 CR1", DBI + in0 + 0x00); reg(" in0 CR2", DBI + in0 + 0x04);
+                        reg(" in0 lower base", DBI + in0 + 0x08); reg(" in0 upper base", DBI + in0 + 0x0c);
+                        reg(" in0 limit", DBI + in0 + 0x10); reg(" in0 lower target", DBI + in0 + 0x14);
+                        reg(" in0 upper target", DBI + in0 + 0x18); log_flush();
+                        wr(DBI + in0 + 0x14, 0); wr(DBI + in0 + 0x18, 0);        /* target: 1:1 */
+                        wr(DBI + in0 + 0x08, 0); wr(DBI + in0 + 0x0c, 0);
+                        wr(DBI + in0 + 0x10, 0xffffffffu);
+                        wr(DBI + in0 + 0x00, 0);                                   /* memory, no function match */
+                        wr(DBI + in0 + 0x04, 0x80000000u);                         /* enabled, match mode off */
+                        log_str("inbound ATU after the identity window\n");
+                        reg(" in0 CR1", DBI + in0 + 0x00); reg(" in0 CR2", DBI + in0 + 0x04);
+                        reg(" in0 lower target", DBI + in0 + 0x14); reg(" in0 upper target", DBI + in0 + 0x18);
+                        log_flush();
+                    }
+                    /* v12: whether the chip's own power domains are up. The PBL runs on little power and
+                     * needs no DMA master; a download that never starts, with every register write landing,
+                     * is what a half-powered WLAN domain looks like (v11 left power as the last suspect). */
+                    log_hex("WLAON_SOC_POWER_CTRL", winrd(bar, 0x1F80000));
+                    log_hex("WLAON_SW_COLD_RESET", winrd(bar, 0x1F8000C));
+                    log_hex("WLAON_WL_PWR_STATUS", winrd(bar, 0x1F8002C));
+                    log_hex("WLAON_APM_STATUS0", winrd(bar, 0x1F800C0));
+                    log_hex("WLAON_APM_STATUS1", winrd(bar, 0x1F800C4));
+                    log_hex("WLAON_APM_STATUS2", winrd(bar, 0x1F800C8)); log_flush();
+                    {
+                        uint32_t before = winrd(bar, 0x1F8031Cu), after;
+
+                        log_hex("WLAON_QFPROM_PWR_CTRL before", before);
+                        winwr(bar, 0x1F8031Cu, before & ~0x5u);
+                        after = winrd(bar, 0x1F8031Cu);
+                        log_hex("WLAON_QFPROM_PWR_CTRL after", after); log_flush();
+                    }
+                    /* v13: BHIe, the way this chip is loaded. The phone's own Android does not use plain BHI
+                     * here: mhi_alloc_bhie_table() splits the firmware into 512 KB segments and puts a table of
+                     * them in memory (struct bhi_vec_entry { u64 dma_addr; u64 size; }), and mhi_fw_load_bhie()
+                     * gives the chip that table's address and size. The chip reads the table first, then each
+                     * segment itself (Android's log: "seg_size: 524288 total_seg: 12", entries at 0xfa880000).
+                     * Our single buffer was a plain-BHI image to a chip that is in BHIe mode, which is exactly
+                     * "the doorbell is taken and nothing is read". */
+                    if (bhie && bhie < 0x100000 && !(bhie & 3)) {
+                        struct { uint64_t addr, size; } *table = (void *)(uintptr_t)0xfb400000ull;   /* in wifi_region, after the image */
+                        uint32_t seg = 0x80000u, at = 0, n = 0, vst = 0xffffffffu, lastv = 0xfffffffeu;
+
+                        while (at < size && n < 23) {
+                            table[n].addr = (uint64_t)(uintptr_t)fw + at;
+                            table[n].size = size - at < seg ? size - at : seg;
+                            at += (uint32_t)table[n].size;
+                            n++;
+                        }
+                        __asm__ volatile("dsb sy" ::: "memory");
+                        log_hex("BHIe segments", n); log_hex(" table at", (uint64_t)(uintptr_t)table);
+                        log_hex(" table size", (uint64_t)n * 16u);
+                        log_hex(" entry 0 addr", table[0].addr); log_hex(" entry 0 size", table[0].size); log_flush();
+                        wr(bar + bhie + 0x30, 0);                                  /* TXVECADDR_HIGH */
+                        wr(bar + bhie + 0x2c, (uint32_t)(uintptr_t)table);         /* TXVECADDR_LOW */
+                        wr(bar + bhie + 0x34, n * 16u);                            /* TXVECSIZE */
+                        wr(bar + bhie + 0x3c, 0x1234567u);                         /* TXVECDB: a sequence id */
+                        stage("BHIe doorbell rung");
+                        t0 = touch_ticks();
+                        while (touch_ticks() - t0 < 6 * counter_freq()) {
+                            vst = rd(bar + bhie + 0x44);
+                            if (vst != lastv) {
+                                log_hex("ms", (touch_ticks() - t0) * 1000u / counter_freq());
+                                log_hex(" BHIe TXVECSTATUS", vst); log_flush();
+                                lastv = vst;
+                            }
+                            if ((vst >> 30) == 2) break;
+                            wait_us(200);
+                        }
+                        log_hex("BHIe TXVECSTATUS final", vst); log_hex(" BHI_EXECENV", rd(bar + bhi + 0x28));
+                        log_hex(" BHIe ERRCODE", rd(bar + bhie + 0x4c)); log_flush();
+                        ee = rd(bar + bhi + 0x28);
+                        stage((vst >> 30) == 2 ? "BHIe: the chip read the table and the image" : "BHIe did not complete");
+                        pci_errors("errors after BHIe: wifi", CFG);
+                    }
                     for (int attempt = 0; attempt < 2 && ee != 1; attempt++) {
                         if (attempt == 0) {
                             volatile uint64_t *to = (volatile uint64_t *)0x8c0000000ull;
-                            const uint64_t *from = (const uint64_t *)(uintptr_t)wifi_sbl;
+                            const uint64_t *from = (const uint64_t *)(uintptr_t)fw;
 
                             for (uint32_t i = 0; i < (size + 7) / 8; i++) to[i] = from[i];
                             __asm__ volatile("dsb sy" ::: "memory");
                             img = 0x8c0000000ull;
                         } else {
-                            img = (uint64_t)(uintptr_t)wifi_sbl;
+                            img = (uint64_t)(uintptr_t)fw;
                         }
                         lastst = lastee = 0xffffffffu;
                         log_hex("BHI attempt", (uint64_t)attempt);
                         log_hex(" image at", img); log_hex(" size", size); log_hex(" its first word", rd(img)); log_flush();
+                        if (attempt == 1) {
+                            /* v14: the one BHI register we have never written. Nothing in the reference touches
+                             * it, but the chip may want the number of segments before it walks the image. */
+                            wr(bar + bhi + 0x48, 1);                 /* BHI_NUMSEG = 1 */
+                            log_hex("BHI_NUMSEG written", 1);
+                        }
                         wr(bar + bhi + 0x20, 0);                    /* BHI_INTVEC: nobody listens */
                         wr(bar + bhi + 0x2c, 0);                    /* BHI_STATUS */
                         wr(bar + bhi + 0x0c, (uint32_t)(img >> 32));
@@ -554,7 +720,7 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                         wr(bar + bhi + 0x18, 0x1234567u + (uint32_t)attempt);  /* BHI_IMGTXDB: a session id, any non-zero 30 bits */
                         stage("BHI doorbell rung");
                         t0 = touch_ticks();
-                        while (touch_ticks() - t0 < 4 * counter_freq()) {
+                        while (touch_ticks() - t0 < 20 * counter_freq()) {
                             st = rd(bar + bhi + 0x2c); ee = rd(bar + bhi + 0x28);
                             if (st != lastst || ee != lastee) {
                                 log_hex("ms", (touch_ticks() - t0) * 1000u / counter_freq());
@@ -568,7 +734,8 @@ void lynxld_main(uint64_t fdt, uint64_t self)
                         reg("BHI_ERRDBG2", bar + bhi + 0x38); reg("BHI_ERRDBG3", bar + bhi + 0x3c);
                         reg("BHI_IMGADDR_LOW back", bar + bhi + 0x08); reg("BHI_IMGADDR_HIGH back", bar + bhi + 0x0c);
                         reg("BHI_IMGSIZE back", bar + bhi + 0x10); reg("BHI_IMGTXDB back", bar + bhi + 0x18);
-                        reg("MHISTATUS", bar + 0x48); reg("MHICTRL", bar + 0x38); reg("MHIVER", bar + 0x08); log_flush();
+                        reg("MHISTATUS", bar + 0x48); reg("MHICTRL", bar + 0x38); reg("MHIVER", bar + 0x08);
+                        reg("BHI_NUMSEG after", bar + bhi + 0x48); log_flush();
                         pci_errors("errors after the download: root port", DBI);
                         pci_errors("errors after the download: wifi", CFG);
                         if (ee == 1) stage("WIFI FIRST LOADER (SBL) RUNNING: the chip read our memory");

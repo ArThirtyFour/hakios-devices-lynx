@@ -1,0 +1,8 @@
+# devices/lynx/drivers/wifi/conf: the Pixel 7a's own Wi-Fi driver (docs/porting/drivers.md).
+
+driver LYNX_WIFI
+	file    bsd/dev/hakios.lynx_wifi.c
+	help    the Pixel 7a Wi-Fi: the WCN6740 on PCIe RC channel 1 (pcie@14520000), brought up step by
+	help    step (wifi=N: 1 power/PHY/link, 2 MHI registers, 3 the BHI firmware download of the SBL from
+	help    fw/amss20.bin with the S2MPU and the PCIe SysMMU opened 1:1 under its buffer, 4 the MHI
+	help    RESET->READY transition); nothing is written to the chip's bar unless the link reached L0

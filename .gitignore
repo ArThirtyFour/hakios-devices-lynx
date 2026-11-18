@@ -17,9 +17,6 @@ fw-*
 Image
 identity.h
 
-# The GPU kernel driver in work: adapted from the Pixel 8a port (Martinvlba/hakios-devices-akita), which has no
-# licence yet. Kept out of the repository until its author agrees or it is rewritten (drivers/gpu/NOT-FOR-PUBLICATION.txt)
-drivers/gpu/
 
 # Runs
 *.log

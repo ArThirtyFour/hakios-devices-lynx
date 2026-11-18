@@ -1,0 +1,12 @@
+# devices/lynx/drivers/gpu/conf: the Pixel 7a's GPU (docs/drivers-config.md, docs/porting/drivers.md).
+#
+# The driver is named AKITA_MALI, not LYNX_MALI: the HakiOS tree this is built in (the akita-port branch) leaves its own
+# stand-ins out by that name (drivers/core/hakios.stubs.c and .cpp: HAKIOS_AKITA_MALI), and a Mali service under another
+# name would meet them at link time (MiniIOSurfaceDrawn defined twice).
+
+driver AKITA_MALI
+	file    bsd/dev/hakios.lynx_mali.c
+	file    iokit/Kernel/hakios.lynx_gpu.cpp iokitcpp
+	help    gs201's Mali-G710 woken step by step (mali=N): its identity, a reset, the L2's power, the CSF firmware
+	help    (fw/mali_csffw-r54p3.bin, the phone's own, from fw-gpu/) loaded behind page tables, the MCU started, jobs;
+	help    mali_keep=1 keeps it on for HakiosGPU, the service with Linux's panthor interface (Mesa's panfrost, panvk)

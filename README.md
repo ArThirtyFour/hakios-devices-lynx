@@ -25,7 +25,7 @@ it from the computer over USB at every boot.
 | battery | works | MAX77759 fuel gauge and charger read over I2C, bit-banged on the bus's pads (`drivers/power/hakios.lynx_battery.c`, `lynx_battery=1`): charge, voltage, current, temperature, charger state |
 | GPU / Metal | partial | the Mali-G710 driver and its IOKit service are in `drivers/gpu/` (kept out of this repository, see there): the GPU comes up step by step (`mali=N`), its MCU runs Arm's CSF firmware (the phone's own `mali_csffw-r54p3.bin`) and answers a ping; the command stream, the shaders and `hakios-metal`'s back end were moved from the Pixel 8a's GPU architecture (G715, arch 11) to this one (G710, arch 10): scordboard, wait masks, GPU_ID. Not yet a working Metal device in iOS: the precompiled blit shaders and a few drawing registers still have to be brought over. |
 | Bluetooth | partial | the loader loads the chip's firmware (WCN6740, UART), the kernel proves it (HCI 12.0000, its own address, LE scan finds devices) and gives it to iOS: the kernel control, the Skywalk pipe and the nodes `/dev/btwake|btreset|btpoweroff` (`drivers/bluetooth/hakios.lynx_bt.c`, the chip-independent half in the main tree). iOS's `bluetoothd` attaches and its logs are answered by an inserted library; it still will not power the controller (the toggle springs back), which is what is being chased. |
-| Wi-Fi | missing | probes only (`probes/pcieprobe.c`): the PCIe link comes up, the chip (17cb:1103) and its MHI registers are read; the firmware download through BHI does not complete, reason unknown |
+| Wi-Fi | partial | a driver now, `drivers/wifi/hakios.lynx_wifi.c` (`wifi=N`): the WCN6740 on PCIe RC channel 1, brought up step by step as the probe did, with the missing step added -- 1 the rails/clocks/PHY and the link to L0, 2 the MHI registers, 3 the SBL (`fw/amss20.bin`, its first 512 KiB) handed to the chip over BHI after the S2MPU and the PCIe SysMMU are opened 1:1 under its buffer and the WLAN domain released (`WLAON_QFPROM_PWR_CTRL`, which the v7 probe showed the PBL was waiting on: it took the doorbell but made no DMA read), 4 the MHI RESET->READY transition. Not yet run on the phone: whether the chip now reads the buffer (BHI_EXECENV 0->1) is exactly what it is for. |
 | storage | missing | none of the phone's: the system image is in RAM |
 | audio, cellular, camera, sensors | missing | audio started: `drivers/aoc/` (gs201's AoC: `aoc_req` 0x181d0000, S2MPU 0x1a0b0000, SysMMU 0x1a090000, GSA 0x17c90000) and `drivers/audio/` (the two CS35L41 on PERIC0 USI7). The AoC needs its firmware (`/vendor/firmware/aoc.bin`, not pulled yet) and a Trusty client to cold-start it; the amplifiers need their SPI clock confirmed. Cellular, camera and sensors: not started. |
 
@@ -45,7 +45,7 @@ form HakiOS reads.
 ## What is here
 
 - `device.conf`, `configs/`, `soc/` — the device layer HakiOS reads (`make lynx_defconfig`).
-- `drivers/` — this phone's kernel drivers: touch and buttons, battery, Bluetooth step one.
+- `drivers/` — this phone's kernel drivers: touch and buttons, battery, Bluetooth step one, Wi-Fi step one.
 - `xnu/start-el2-secondary.patch` — a change to XNU's `start.s`: on this SoC a core started with PSCI CPU_ON
   arrives in EL2, and is brought down to EL1 before the kernel's own reset code. Without it only one core runs.
 - `gspe-plan.c`, `gspe-plan.h` — the reader of the kernel container the loader is given (see "Build").
@@ -94,7 +94,7 @@ You need an **unlocked bootloader**, the HakiOS tree with its toolchain (`clang`
    python3 devices/lynx/tools/check-gspe.py kernel.gspe
    ```
 4. From **your own phone**, in Android with root: its `boot_a` (the container the image is made in; it is only
-   read) and, for Bluetooth, two firmware files:
+   read) and, for Bluetooth and Wi-Fi, three firmware files:
    ```
    adb shell su -c 'dd if=/dev/block/by-name/boot_a' > boot_a.img
    python3 - <<'EOF'
@@ -106,7 +106,11 @@ You need an **unlocked bootloader**, the HakiOS tree with its toolchain (`clang`
    mkdir -p devices/lynx/fw-lynx
    adb pull /vendor/firmware/hpbtfw21.tlv devices/lynx/fw-lynx/
    adb pull /vendor/firmware/hpnv21.bin devices/lynx/fw-lynx/
+   adb pull /vendor/firmware/amss20.bin devices/lynx/fw-lynx/    # the Wi-Fi driver's (drivers/wifi, wifi=N)
    ```
+   The Wi-Fi driver reads `fw/amss20.bin` of the small image, so before `userland/build.sh` put it where
+   that script copies firmware from: `cp devices/lynx/fw-lynx/amss20.bin ../fw-wifi/` (or add a line to
+   `userland/build.sh` beside the other `../fw-*`).
 5. The loader and the image:
    ```
    devices/lynx/lynxld/build.sh
@@ -129,7 +133,7 @@ half to two minutes after `JUMP`; with Bluetooth in the loader about 14 seconds 
 
 After the run, back in Android, what the loader and the drivers said is in
 `/sys/fs/pstore/console-ramoops-0` (root): the loader's stages, then lines beginning `lynx_touch:`,
-`lynx_battery:`, `lynx_bt:`.
+`lynx_battery:`, `lynx_bt:`, `lynx_wifi:`.
 
 ## Probes
 
